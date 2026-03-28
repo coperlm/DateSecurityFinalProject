@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>企业级合规文件加密客户端</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* 自定义动画 */
+    @keyframes pulse-slow { 0%,100%{opacity:1} 50%{opacity:.5} }
+    @keyframes slide-in  { from{transform:translateY(12px);opacity:0} to{transform:translateY(0);opacity:1} }
+    .anim-pulse-slow { animation: pulse-slow 2s cubic-bezier(.4,0,.6,1) infinite; }
+    .anim-slide-in   { animation: slide-in  .35s ease both; }
+
+    /* 代码字体 */
+    .mono { font-family: 'Courier New', Courier, monospace; }
+
+    /* 进度步骤 */
+    .step-done   { color:#22c55e; }
+    .step-active { color:#60a5fa; animation: pulse-slow 1.2s ease infinite; }
+    .step-wait   { color:#4b5563; }
+
+    /* 链表行悬浮 */
+    .chain-row:hover { background: rgba(255,255,255,.04); }
+
+    /* 高亮闪烁（用于 hash 不变提示） */
+    @keyframes flash-green { 0%,100%{background:transparent} 30%{background:rgba(34,197,94,.25)} }
+    .flash-green { animation: flash-green 1.2s ease 3; }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen p-4 md:p-8">
+
+<!-- ══════════════════════ 顶部 Header ══════════════════════ -->
+<header class="max-w-5xl mx-auto mb-10">
+  <div class="flex items-center gap-3 mb-1">
+    <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-sm font-bold shadow-lg shadow-blue-600/30">🔐</div>
+    <h1 class="text-2xl font-bold tracking-tight">企业级合规文件加密客户端</h1>
+    <span class="ml-auto text-xs bg-blue-900/50 border border-blue-700/50 text-blue-300 px-2 py-1 rounded">v0.1.0 · AES+RSA+Chameleon</span>
+  </div>
+  <p class="text-gray-500 text-sm ml-11">基于 AES-GCM + RSA 数字信封 + 变色龙哈希可修订微型区块链</p>
+</header>
+
+<!-- ══════════════════════ 主体三栏 ══════════════════════ -->
+<main class="max-w-5xl mx-auto grid grid-cols-1 gap-6">
+
+  <!-- ─────────────── 卡片 A：极密上传 ─────────────── -->
+  <section class="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl">
+    <div class="flex items-center gap-2 mb-5">
+      <span class="text-xl">🔒</span>
+      <h2 class="text-lg font-semibold">极密上传</h2>
+      <span class="text-xs text-gray-500 ml-2">混合加密并存证上链</span>
+    </div>
+
+    <!-- 密钥工具 -->
+    <div class="mb-4 p-4 bg-gray-800/60 rounded-xl border border-gray-700/50">
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-sm text-gray-400 font-medium">🔑 身份密钥对（Ed25519）</span>
+        <button id="btn-gen-keys"
+          class="text-xs bg-indigo-700 hover:bg-indigo-600 transition px-3 py-1.5 rounded-lg font-medium">
+          生成临时密钥
+        </button>
+      </div>
+      <div class="grid grid-cols-1 gap-2">
+        <div>
+          <label class="text-xs text-gray-500">私钥 (Base64 · 32B)</label>
+          <input id="inp-privkey" type="text" placeholder="点击"生成临时密钥"填充..."
+            class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-green-400 mt-1 outline-none focus:border-blue-600 transition" />
+        </div>
+        <div>
+          <label class="text-xs text-gray-500">公钥 (Base64 · 32B)</label>
+          <input id="inp-pubkey" type="text" placeholder="点击"生成临时密钥"填充..."
+            class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-blue-400 mt-1 outline-none focus:border-blue-600 transition" />
+        </div>
+      </div>
+    </div>
+
+    <!-- 明文输入 -->
+    <div class="mb-4">
+      <label class="text-sm text-gray-400 font-medium">📄 待加密明文</label>
+      <textarea id="inp-plaintext" rows="4" placeholder="在此输入机密文件内容..."
+        class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm mt-2 outline-none focus:border-blue-600 transition resize-none">
+      </textarea>
+    </div>
+
+    <!-- 上链按钮 -->
+    <button id="btn-encrypt-mine"
+      class="w-full bg-blue-700 hover:bg-blue-600 active:bg-blue-800 transition font-semibold py-3 rounded-xl text-sm shadow-lg shadow-blue-700/30 flex items-center justify-center gap-2">
+      <span>⚡</span> 混合加密并存证上链
+    </button>
+
+    <!-- 进度条面板 -->
+    <div id="progress-panel" class="hidden mt-5 p-4 bg-black/30 rounded-xl border border-gray-700/50 anim-slide-in">
+      <p class="text-xs text-gray-400 mb-3 font-medium">📊 加密流程进度</p>
+      <div class="space-y-2">
+        <div id="step-aes"    class="text-xs step-wait flex items-center gap-2"><span>○</span> AES-256-GCM 对称加密明文</div>
+        <div id="step-rsa"    class="text-xs step-wait flex items-center gap-2"><span>○</span> RSA 公钥封装 AES 密钥（数字信封）</div>
+        <div id="step-sig"    class="text-xs step-wait flex items-center gap-2"><span>○</span> Ed25519 签名 Payload（身份认证）</div>
+        <div id="step-cmac"   class="text-xs step-wait flex items-center gap-2"><span>○</span> AES-128-CMAC 压缩区块数据</div>
+        <div id="step-ch"     class="text-xs step-wait flex items-center gap-2"><span>○</span> 变色龙哈希 CH = H(m)·r^e mod N</div>
+        <div id="step-chain"  class="text-xs step-wait flex items-center gap-2"><span>○</span> 区块追加上链</div>
+      </div>
+      <!-- 结果 -->
+      <div id="mine-result" class="hidden mt-4 mono text-xs bg-green-950/60 border border-green-800/50 rounded-lg p-3 text-green-300 break-all"></div>
+    </div>
+  </section>
+
+  <!-- ─────────────── 卡片 B：存证浏览器 ─────────────── -->
+  <section class="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl">
+    <div class="flex items-center gap-2 mb-5">
+      <span class="text-xl">📂</span>
+      <h2 class="text-lg font-semibold">存证浏览器</h2>
+      <span class="text-xs text-gray-500 ml-2">链上数据实时预览</span>
+      <button id="btn-refresh"
+        class="ml-auto text-xs bg-gray-700 hover:bg-gray-600 transition px-3 py-1.5 rounded-lg">
+        🔄 刷新
+      </button>
+    </div>
+
+    <!-- 链状态摘要 -->
+    <div id="chain-summary" class="grid grid-cols-3 gap-3 mb-5">
+      <div class="bg-gray-800/70 rounded-xl p-3 text-center">
+        <p class="text-2xl font-bold text-blue-400" id="stat-blocks">—</p>
+        <p class="text-xs text-gray-500 mt-1">区块总数</p>
+      </div>
+      <div class="bg-gray-800/70 rounded-xl p-3 text-center">
+        <p class="text-2xl font-bold text-purple-400" id="stat-txs">—</p>
+        <p class="text-xs text-gray-500 mt-1">交易记录</p>
+      </div>
+      <div class="bg-gray-800/70 rounded-xl p-3 text-center">
+        <p class="text-2xl font-bold text-green-400" id="stat-valid">—</p>
+        <p class="text-xs text-gray-500 mt-1">链完整性</p>
+      </div>
+    </div>
+
+    <!-- 区块列表 -->
+    <div id="chain-list" class="space-y-3 max-h-96 overflow-y-auto pr-1">
+      <p class="text-gray-600 text-sm text-center py-6">点击"刷新"加载链数据...</p>
+    </div>
+  </section>
+
+  <!-- ─────────────── 卡片 C：审计与合规修订 ─────────────── -->
+  <section class="bg-gray-900 border border-amber-900/40 rounded-2xl p-6 shadow-xl">
+    <div class="flex items-center gap-2 mb-5">
+      <span class="text-xl">⚠️</span>
+      <h2 class="text-lg font-semibold text-amber-300">审计与合规修订</h2>
+      <span class="text-xs text-amber-700 bg-amber-900/30 border border-amber-800/40 px-2 py-1 rounded ml-2">Admin Only</span>
+    </div>
+
+    <div class="p-4 bg-amber-950/30 border border-amber-800/30 rounded-xl text-xs text-amber-300/80 mb-5">
+      ⚡ <strong>变色龙哈希陷门碰撞</strong>：利用 RSA 陷门私钥 <em>d</em>，
+      Admin 可将任意区块的 Payload 替换为合规抹除标记，同时计算新随机数 <em>r'</em>，
+      使区块哈希 <code class="text-amber-200">CH</code> 奇迹般保持不变，链完整性校验依然通过。
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+      <div>
+        <label class="text-sm text-gray-400 font-medium">区块索引</label>
+        <input id="inp-redact-index" type="number" min="0" value="1"
+          class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm mt-2 outline-none focus:border-amber-600 transition" />
+      </div>
+      <div>
+        <label class="text-sm text-gray-400 font-medium">合规抹除标记</label>
+        <input id="inp-redact-label" type="text" value="【已合规抹除 · GDPR Article 17】"
+          class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm mt-2 outline-none focus:border-amber-600 transition" />
+      </div>
+    </div>
+
+    <button id="btn-redact"
+      class="w-full bg-amber-700 hover:bg-amber-600 active:bg-amber-800 transition font-semibold py-3 rounded-xl text-sm shadow-lg shadow-amber-700/20 flex items-center justify-center gap-2">
+      <span>🗑️</span> 物理抹除（合规修订）
+    </button>
+
+    <!-- 修订结果对比面板 -->
+    <div id="redact-result" class="hidden mt-5 anim-slide-in">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- 修订前 -->
+        <div class="p-4 bg-gray-800/60 rounded-xl border border-gray-700/50">
+          <p class="text-xs text-gray-400 font-medium mb-2">修订前 Payload</p>
+          <p id="redact-old-payload" class="mono text-xs text-red-300 break-all"></p>
+          <div class="mt-2 pt-2 border-t border-gray-700">
+            <p class="text-xs text-gray-500">随机数 r</p>
+            <p id="redact-old-r" class="mono text-xs text-gray-400 break-all mt-1"></p>
+          </div>
+        </div>
+        <!-- 修订后 -->
+        <div class="p-4 bg-gray-800/60 rounded-xl border border-gray-700/50">
+          <p class="text-xs text-gray-400 font-medium mb-2">修订后 Payload</p>
+          <p id="redact-new-payload" class="mono text-xs text-green-300 break-all"></p>
+          <div class="mt-2 pt-2 border-t border-gray-700">
+            <p class="text-xs text-gray-500">新随机数 r'</p>
+            <p id="redact-new-r" class="mono text-xs text-green-400 break-all mt-1"></p>
+          </div>
+        </div>
+      </div>
+      <!-- 哈希不变高亮 -->
+      <div id="redact-hash-proof" class="mt-4 p-4 bg-green-950/50 border border-green-600/40 rounded-xl flash-green">
+        <p class="text-xs text-green-400 font-semibold mb-2">✅ 区块哈希奇迹般保持不变（变色龙哈希陷门碰撞证明）</p>
+        <p class="mono text-xs text-green-300 break-all" id="redact-hash-value"></p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ══════════════════════ Footer ══════════════════════ -->
+<footer class="max-w-5xl mx-auto mt-10 text-center text-gray-700 text-xs">
+  <p>DateSecurityFinalProject · AES-256-GCM + RSA-2048 + AES-128-CMAC + Chameleon Hash + Ed25519</p>
+  <p class="mt-1">后量子签名扩展注释：此处未来将通过 C-FFI 接入 FAEST 后量子签名算法</p>
+</footer>
+
+<!-- ══════════════════════ JavaScript ══════════════════════ -->
+<script>
+// ── 工具函数 ──────────────────────────────────────────────
+
+const $ = id => document.getElementById(id);
+const truncate = (s, n=32) => s && s.length > n ? s.slice(0, n) + '…' : (s || '');
+
+function showToast(msg, ok=true) {
+  const t = document.createElement('div');
+  t.className = `fixed bottom-6 right-6 z-50 px-4 py-3 rounded-xl text-sm font-medium shadow-xl anim-slide-in
+    ${ok ? 'bg-green-800 text-green-100 border border-green-600' : 'bg-red-900 text-red-100 border border-red-700'}`;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+
+// ── 生成密钥对 ────────────────────────────────────────────
+
+$('btn-gen-keys').addEventListener('click', async () => {
+  try {
+    const res = await fetch('/keys');
+    const data = await res.json();
+    $('inp-privkey').value = data.ed25519_private_key;
+    $('inp-pubkey').value  = data.ed25519_public_key;
+    showToast('✅ Ed25519 临时密钥对已生成');
+  } catch(e) {
+    showToast('❌ 密钥生成失败: ' + e.message, false);
+  }
+});
+
+// ── 加密并上链 ────────────────────────────────────────────
+
+async function setStep(id, state) {
+  const el = $(id);
+  if (!el) return;
+  el.className = `text-xs ${state === 'done' ? 'step-done' : state === 'active' ? 'step-active' : 'step-wait'} flex items-center gap-2`;
+  el.querySelector('span').textContent = state === 'done' ? '✓' : state === 'active' ? '◉' : '○';
+}
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+$('btn-encrypt-mine').addEventListener('click', async () => {
+  const plaintext = $('inp-plaintext').value.trim();
+  const privKey   = $('inp-privkey').value.trim();
+  const pubKey    = $('inp-pubkey').value.trim();
+
+  if (!plaintext) { showToast('❌ 请输入明文内容', false); return; }
+  if (!privKey || !pubKey) { showToast('❌ 请先生成或填写密钥对', false); return; }
+
+  // 展示进度面板
+  $('progress-panel').classList.remove('hidden');
+  $('mine-result').classList.add('hidden');
+  ['step-aes','step-rsa','step-sig','step-cmac','step-ch','step-chain'].forEach(s => setStep(s,'wait'));
+
+  // 模拟分步进度（实际加密在后端完成）
+  await sleep(200);  setStep('step-aes', 'active');
+  await sleep(400);  setStep('step-aes', 'done'); setStep('step-rsa', 'active');
+  await sleep(400);  setStep('step-rsa', 'done'); setStep('step-sig', 'active');
+  await sleep(300);  setStep('step-sig', 'done'); setStep('step-cmac', 'active');
+  await sleep(300);  setStep('step-cmac','done'); setStep('step-ch',   'active');
+  // 等待后端完成变色龙哈希计算（step-ch 保持 active 状态，直到服务器响应）
+
+  try {
+    const res  = await fetch('/encrypt_and_mine', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ plaintext, sender_private_key: privKey, sender_public_key: pubKey })
+    });
+    const data = await res.json();
+
+    setStep('step-ch', 'done'); setStep('step-chain', 'active');
+    await sleep(300); setStep('step-chain', 'done');
+
+    if (data.success) {
+      const b = data.block;
+      $('mine-result').classList.remove('hidden');
+      $('mine-result').innerHTML = `
+        <p class="text-green-400 font-semibold mb-2">✅ ${data.message}</p>
+        <p><span class="text-gray-400">区块 #</span>${b.index}</p>
+        <p><span class="text-gray-400">Hash  </span>${truncate(b.hash, 56)}</p>
+        <p><span class="text-gray-400">Tx ID </span>${b.tx.tx_id}</p>
+        <p><span class="text-gray-400">密文  </span>${truncate(b.tx.payload.ciphertext, 48)}</p>
+      `;
+      showToast('✅ 已成功打包上链！');
+      loadChain();
+    } else {
+      showToast('❌ ' + (data.error || '上链失败'), false);
+    }
+  } catch(e) {
+    setStep('step-ch','wait'); setStep('step-chain','wait');
+    showToast('❌ 请求失败: ' + e.message, false);
+  }
+});
+
+// ── 加载并渲染链数据 ──────────────────────────────────────
+
+async function loadChain() {
+  try {
+    const res  = await fetch('/chain');
+    const data = await res.json();
+    const blocks = data.blocks || [];
+
+    $('stat-blocks').textContent = blocks.length;
+    $('stat-txs').textContent    = blocks.length > 0 ? blocks.length - 1 : 0; // 排除创世块
+    $('stat-valid').textContent  = data.is_valid ? '✓ 合法' : '✗ 异常';
+
+    const list = $('chain-list');
+    if (blocks.length === 0) {
+      list.innerHTML = '<p class="text-gray-600 text-sm text-center py-6">链上暂无数据</p>';
+      return;
+    }
+
+    list.innerHTML = blocks.map((b, i) => `
+      <div class="chain-row p-4 bg-gray-800/60 rounded-xl border border-gray-700/50 anim-slide-in">
+        <div class="flex items-center gap-2 mb-3">
+          <span class="text-xs font-bold bg-blue-900/60 text-blue-300 border border-blue-700/40 px-2 py-0.5 rounded">
+            #${b.index}
+          </span>
+          ${i===0 ? '<span class="text-xs text-amber-400 bg-amber-900/30 border border-amber-700/30 px-2 py-0.5 rounded">Genesis</span>' : ''}
+          <span class="text-xs text-gray-500 ml-auto">${new Date(b.timestamp).toLocaleString('zh-CN')}</span>
+        </div>
+        <div class="grid grid-cols-1 gap-1 text-xs mono">
+          <div class="flex gap-2">
+            <span class="text-gray-500 shrink-0 w-20">Payload</span>
+            <span class="text-yellow-300 break-all">${truncate(b.tx.payload.ciphertext, 40)}</span>
+          </div>
+          <div class="flex gap-2">
+            <span class="text-gray-500 shrink-0 w-20">随机数 r</span>
+            <span class="text-purple-300 break-all">${truncate(b.randomness, 40)}</span>
+          </div>
+          <div class="flex gap-2">
+            <span class="text-gray-500 shrink-0 w-20">区块 Hash</span>
+            <span class="text-green-300 break-all" id="block-hash-${b.index}">${truncate(b.hash, 56)}</span>
+          </div>
+          <div class="flex gap-2">
+            <span class="text-gray-500 shrink-0 w-20">Tx ID</span>
+            <span class="text-gray-400 break-all">${b.tx.tx_id}</span>
+          </div>
+        </div>
+      </div>
+    `).join('');
+
+  } catch(e) {
+    showToast('❌ 链数据加载失败: ' + e.message, false);
+  }
+}
+
+$('btn-refresh').addEventListener('click', loadChain);
+
+// ── 合规修订 ──────────────────────────────────────────────
+
+$('btn-redact').addEventListener('click', async () => {
+  const blockIndex    = parseInt($('inp-redact-index').value);
+  const redactLabel   = $('inp-redact-label').value.trim() || '【已合规抹除】';
+
+  if (isNaN(blockIndex) || blockIndex < 0) {
+    showToast('❌ 请输入有效的区块索引', false);
+    return;
+  }
+
+  // 记录修订前状态
+  let oldPayload = '', oldR = '';
+  try {
+    const chainRes = await fetch('/chain');
+    const chainData = await chainRes.json();
+    const blocks = chainData.blocks || [];
+    if (blockIndex < blocks.length) {
+      oldPayload = blocks[blockIndex].tx.payload.ciphertext;
+      oldR       = blocks[blockIndex].randomness;
+    }
+  } catch(_) {}
+
+  try {
+    const res  = await fetch('/redact', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ block_index: blockIndex, redaction_label: redactLabel })
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      const b = data.block;
+      $('redact-result').classList.remove('hidden');
+
+      $('redact-old-payload').textContent = truncate(oldPayload, 60);
+      $('redact-old-r').textContent       = truncate(oldR, 60);
+      $('redact-new-payload').textContent = truncate(b.tx.payload.ciphertext, 60);
+      $('redact-new-r').textContent       = truncate(b.randomness, 60);
+      $('redact-hash-value').textContent  = b.hash;
+
+      // 移除并重新触发闪烁动画
+      const proof = $('redact-hash-proof');
+      proof.classList.remove('flash-green');
+      void proof.offsetWidth; // 触发重排
+      proof.classList.add('flash-green');
+
+      showToast('✅ 合规修订完成，区块哈希保持不变！');
+      loadChain();
+    } else {
+      showToast('❌ ' + (data.error || '修订失败'), false);
+    }
+  } catch(e) {
+    showToast('❌ 请求失败: ' + e.message, false);
+  }
+});
+
+// ── 初始加载 ──────────────────────────────────────────────
+loadChain();
+</script>
+</body>
+</html>

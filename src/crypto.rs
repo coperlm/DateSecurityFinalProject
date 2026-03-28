@@ -8,12 +8,11 @@ use aes_gcm::{
 };
 use anyhow::{anyhow, Result};
 use cmac::{Cmac, Mac};
+use sha2::{Digest, Sha256};
 // Ed25519 卸载：使用 FAEST via C-FFI
 use num_bigint::{BigUint, RandBigInt};
-use rug::Integer;
-use std::str::FromStr;
 use std::time::Instant;
-use num_integer::Integer as NumIntegerTrait;
+use num_integer::Integer;
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
 use rsa::{
@@ -150,9 +149,14 @@ pub fn generate_rsa_keypair() -> Result<(RsaPrivateKey, RsaPublicKey)> {
 /// 而非 MAC（MAC 需要秘密 key）。此处仅用于哈希语义。
 pub fn h_aes(data: &[u8]) -> BigUint {
     // 使用全零 128-bit key（公共常量，非密钥用途）
+    // 优化：对于任意长度输入，先使用 SHA-256 摘要，再对定长摘要做 CMAC，
+    // 这样可以显著降低 CMAC 对超大文件的处理开销，同时保持确定性。
     let key = [0u8; 16];
     let mut mac = <Cmac<Aes128> as Mac>::new_from_slice(&key).expect("AES-CMAC 初始化失败");
-    mac.update(data);
+
+    // 先做 SHA-256 摘要（固定 32 字节），再对摘要做 CMAC
+    let digest = Sha256::digest(data);
+    mac.update(&digest);
     let tag = mac.finalize().into_bytes();
     BigUint::from_bytes_be(&tag)
 }
@@ -168,6 +172,8 @@ pub struct ChameleonHash {
     pub n: BigUint,
     /// RSA 公钥指数 e
     pub e: BigUint,
+    /// 若 e 能表示为 u64，则缓存为小整数以加速模幂
+    pub e_small: Option<u64>,
     /// RSA 私钥指数 d（仅在初始化时用于计算 CRT 参数，不在结构体中持久保留）
     /// RSA 素因子 p
     pub p: BigUint,
@@ -206,25 +212,24 @@ impl ChameleonHash {
         // 计算 qinv = q^{-1} mod p
         let qinv = mod_inverse(&q, &p).expect("无法计算 q 的模逆，RSA 素因子不符合要求");
 
-        ChameleonHash { n, e, p, q, dp, dq, qinv }
+        // 尝试把 e 缩减为 u64（常见值 65537 可放入）以便在频繁的 r^e mod N 计算上优化
+        use num_traits::ToPrimitive;
+        let e_small = e.to_u64();
+
+        ChameleonHash { n, e, p, q, dp, dq, qinv, e_small }
     }
 
     /// 正向哈希（矿工打包）：
     /// CH = H_AES(m) * r^e mod N
     pub fn hash(&self, data: &[u8], r: &BigUint) -> BigUint {
         let hm = h_aes(data);
-        // 使用 rug (GMP) 进行快速模幂计算以提升性能：
-        let start = Instant::now();
-        let r_dec = r.to_str_radix(10);
-        let e_dec = self.e.to_str_radix(10);
-        let n_dec = self.n.to_str_radix(10);
-        let r_rug = Integer::from_str(&r_dec).expect("rug parse r");
-        let e_rug = Integer::from_str(&e_dec).expect("rug parse e");
-        let n_rug = Integer::from_str(&n_dec).expect("rug parse n");
-        let re_rug = r_rug.pow_mod(&e_rug, &n_rug).expect("rug pow_mod");
-        let re = BigUint::from_str(&re_rug.to_string_radix(10)).expect("to BigUint");
-        let elapsed = start.elapsed();
-        eprintln!("[perf] ChameleonHash::hash rug modpow elapsed: {} ms", elapsed.as_millis());
+        // 使用 BigUint 自带的模幂实现（避免每次转换为 rug），性能良好且无需字符串解析。
+        // 若公钥指数 e 是小整数，使用针对 u64 指数的快速模幂实现，避免 BigUint 指数开销
+        let re = if let Some(e_small) = self.e_small {
+            modpow_u64(r, e_small, &self.n)
+        } else {
+            r.modpow(&self.e, &self.n)
+        };
         (hm * re) % &self.n
     }
 
@@ -261,33 +266,17 @@ impl ChameleonHash {
         // h = (m1 - m2) * qinv mod p
         // result = m2 + q * h
         let start = Instant::now();
-        // 使用 rug 对模幂部分执行加速（CRT 仍然用于合并）
-        let ratio_dec = ratio.to_str_radix(10);
-        let p_dec = self.p.to_str_radix(10);
-        let q_dec = self.q.to_str_radix(10);
-        let dp_dec = self.dp.to_str_radix(10);
-        let dq_dec = self.dq.to_str_radix(10);
-
-        let ratio_rug = Integer::from_str(&ratio_dec).expect("parse ratio");
-        let p_rug = Integer::from_str(&p_dec).expect("parse p");
-        let q_rug = Integer::from_str(&q_dec).expect("parse q");
-        let dp_rug = Integer::from_str(&dp_dec).expect("parse dp");
-        let dq_rug = Integer::from_str(&dq_dec).expect("parse dq");
-
-        let m1_rug = ratio_rug.clone().pow_mod(&dp_rug, &p_rug).expect("pow_mod p");
-        let m2_rug = ratio_rug.pow_mod(&dq_rug, &q_rug).expect("pow_mod q");
-
-        // 将 m1/m2 转回 BigUint 以沿用原有 CRT 合并逻辑
-        let m1 = BigUint::from_str(&m1_rug.to_string_radix(10)).expect("m1 to BigUint");
-        let m2 = BigUint::from_str(&m2_rug.to_string_radix(10)).expect("m2 to BigUint");
+        // 使用 BigUint 的模幂与 CRT 合并（避免 rug 的字符串解析开销）
+        let m1 = ratio.modpow(&self.dp, &self.p);
+        let m2 = ratio.modpow(&self.dq, &self.q);
 
         // 计算 h = (m1 - m2) * qinv mod p（处理 m1 < m2 的情况）
         let mut diff = if m1 >= m2 { m1.clone() - m2.clone() } else { (m1.clone() + &self.p) - m2.clone() };
         diff = (diff * &self.qinv) % &self.p;
         let result = m2 + (&self.q * diff);
         let elapsed = start.elapsed();
-        eprintln!("[perf] ChameleonHash::forge CRT+rug elapsed: {} ms", elapsed.as_millis());
 
+        eprintln!("[perf] ChameleonHash::forge CRT+BigUint elapsed: {} ms", elapsed.as_millis());
         // r' = result * r mod N
         let r_prime = (result * old_r) % &self.n;
 
@@ -316,6 +305,23 @@ fn mod_inverse(a: &BigUint, m: &BigUint) -> Option<BigUint> {
     // 将结果规范化到 [0, m)
     let result = ((x % &m_int) + &m_int) % &m_int;
     result.to_biguint()
+}
+
+/// 快速模幂：基于 u64 指数的平方-乘 (square-and-multiply)，用于加速常见小指数场景（如 e=65537）。
+fn modpow_u64(base: &BigUint, mut exp: u64, modulus: &BigUint) -> BigUint {
+    if modulus.is_one() { return BigUint::zero(); }
+    let mut result = BigUint::one();
+    let mut base_mod = base % modulus;
+    while exp > 0 {
+        if (exp & 1) == 1 {
+            result = (&result * &base_mod) % modulus;
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base_mod = (&base_mod * &base_mod) % modulus;
+        }
+    }
+    result
 }
 
 /// 扩展欧几里得算法，返回 (gcd, x, y) 使得 a*x + b*y = gcd。

@@ -26,8 +26,10 @@ aes-gcm = "0.10"
 aes = "0.8"
 cmac = "0.7"
 
-# 密码学：Ed25519 签名（FAEST 后量子签名占位符）
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+# SHA-256 用于先摘要大型明文以缩短 CMAC 输入
+sha2 = "0.10"
+
+# 密码学：FAEST 后量子签名（通过 C-FFI 链接 libs/faest）
 
 # 随机数生成
 rand = "0.8"
@@ -44,3 +46,10 @@ thiserror = "1"
 
 # Base64 编码（用于 JSON 序列化二进制数据）
 base64 = "0.22"
+# 使用 rug（GMP 后端）加速大整数模幂
+# rug 已不再直接使用，改用 num-bigint 的 modpow
+# C FFI size_t
+libc = "0.2"
+
+[build-dependencies]
+cc = "1.0"

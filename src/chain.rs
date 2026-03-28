@@ -7,7 +7,7 @@ use chrono::Utc;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{ChameleonHash, Ed25519Impl, PqSignature, envelope_encrypt};
+use crate::crypto::{ChameleonHash, FaestImpl, PqSignature, envelope_encrypt};
 use rsa::RsaPublicKey;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -24,6 +24,10 @@ pub struct EncryptedPayload {
     pub nonce: String,
     /// RSA-PKCS1v15 加密后的 AES-256 密钥，Base64 编码
     pub encrypted_key: String,
+    /// 原始文件名（若上传的是文件），可选
+    pub filename: Option<String>,
+    /// 原始 MIME 类型（若上传的是文件），可选
+    pub mime_type: Option<String>,
 }
 
 /// 区块链上的一笔交易，携带加密 Payload 与发送者的身份签名。
@@ -33,9 +37,9 @@ pub struct Transaction {
     pub tx_id: String,
     /// 加密后的数据载荷
     pub payload: EncryptedPayload,
-    /// 发送者对 Payload 的 Ed25519 签名，Base64 编码（64 字节）
+    /// 发送者对 Payload 的签名（Base64 编码）
     pub sender_signature: String,
-    /// 发送者 Ed25519 公钥，Base64 编码（32 字节）
+    /// 发送者公钥（Base64 编码），算法（如 FAEST）长度视具体实现而定
     pub sender_pub_key: String,
 }
 
@@ -144,10 +148,12 @@ impl Blockchain {
             ciphertext: B64.encode(&envelope_result.ciphertext),
             nonce: B64.encode(&envelope_result.nonce),
             encrypted_key: B64.encode(&envelope_result.encrypted_key),
+            filename: None,
+            mime_type: None,
         };
 
-        // 签名 payload
-        let signer = Ed25519Impl;
+        // 签名 payload（使用后量子 FAEST）
+        let signer = FaestImpl;
         let payload_bytes = payload_to_bytes(&payload);
         let sig_bytes = signer.sign(&payload_bytes, sender_priv_bytes)?;
 
@@ -187,8 +193,8 @@ impl Blockchain {
         ch: &ChameleonHash,
         tx: Transaction,
     ) -> Result<()> {
-        // 验证签名
-        let signer = Ed25519Impl;
+        // 验证签名（使用后量子 FAEST）
+        let signer = FaestImpl;
         let payload_bytes = payload_to_bytes(&tx.payload);
         let sig_bytes = B64
             .decode(&tx.sender_signature)
@@ -259,6 +265,8 @@ impl Blockchain {
             ciphertext: B64.encode(redaction_label.as_bytes()),
             nonce: B64.encode(b"000000000000"),
             encrypted_key: B64.encode(b"REDACTED"),
+            filename: None,
+            mime_type: None,
         };
 
         // 构造合规标记的 Transaction（保留原 tx_id 和 sender 信息）
@@ -281,8 +289,11 @@ impl Blockchain {
         let r_prime = ch.forge(&old_content, &old_r, &new_content)?;
 
         // 验证碰撞正确性（安全关键检查，在所有构建模式下执行）
-        if ch.hash(&old_content, &old_r) != ch.hash(&new_content, &r_prime) {
-            return Err(anyhow!("内部错误：变色龙哈希碰撞验证失败，陷门计算异常"));
+        let computed_old = ch.hash(&old_content, &old_r);
+        let computed_new = ch.hash(&new_content, &r_prime);
+        if computed_old != computed_new {
+            // 返回更详细的错误以便调试（包括十六进制表示）
+            return Err(anyhow!("变色龙哈希碰撞验证失败: old != new"));
         }
 
         // 更新区块（hash 值不变，randomness 和 tx 被替换）
@@ -297,6 +308,40 @@ impl Blockchain {
 
         self.blocks[index] = updated_block;
         Ok(())
+    }
+
+    /// 为指定区块和给定的 redaction_label 构造将用于签名/验证的新内容字节（不修改链）
+    pub fn redaction_content_bytes(&self, index: usize, redaction_label: &str) -> Result<Vec<u8>> {
+        let block = self
+            .blocks
+            .get(index)
+            .ok_or_else(|| anyhow!("区块索引 {} 不存在", index))?
+            .clone();
+
+        // 构造合规抹除标记的假 Payload
+        let redacted_payload = EncryptedPayload {
+            ciphertext: B64.encode(redaction_label.as_bytes()),
+            nonce: B64.encode(b"000000000000"),
+            encrypted_key: B64.encode(b"REDACTED"),
+            filename: None,
+            mime_type: None,
+        };
+
+        let redacted_tx = Transaction {
+            tx_id: block.tx.tx_id.clone(),
+            payload: redacted_payload,
+            sender_signature: block.tx.sender_signature.clone(),
+            sender_pub_key: block.tx.sender_pub_key.clone(),
+        };
+
+        let new_content = block_content_bytes(
+            block.index,
+            block.timestamp,
+            &redacted_tx,
+            &block.prev_hash,
+        );
+
+        Ok(new_content)
     }
 
     /// 验证整条链的哈希完整性。
@@ -348,22 +393,22 @@ impl Default for Blockchain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{generate_ed25519_keypair, generate_rsa_keypair};
+    use crate::crypto::{generate_faest_keypair, generate_rsa_keypair};
 
     fn setup() -> (ChameleonHash, RsaPublicKey, Vec<u8>, Vec<u8>) {
         let (rsa_priv, rsa_pub) = generate_rsa_keypair().unwrap();
         let ch = ChameleonHash::setup(&rsa_priv);
-        let (ed_priv, ed_pub) = generate_ed25519_keypair();
-        (ch, rsa_pub, ed_priv, ed_pub)
+        let (faest_priv, faest_pub) = generate_faest_keypair();
+        (ch, rsa_pub, faest_priv, faest_pub)
     }
 
     #[test]
     fn test_genesis_and_add_block() {
-        let (ch, rsa_pub, ed_priv, ed_pub) = setup();
+        let (ch, rsa_pub, faest_priv, faest_pub) = setup();
         let mut chain = Blockchain::new();
 
         // 创世块
-        chain.genesis_block(&ch, &rsa_pub, &ed_priv, &ed_pub).unwrap();
+        chain.genesis_block(&ch, &rsa_pub, &faest_priv, &faest_pub).unwrap();
         assert_eq!(chain.blocks.len(), 1);
 
         // 添加新区块
@@ -373,17 +418,19 @@ mod tests {
             ciphertext: B64.encode(&envelope.ciphertext),
             nonce: B64.encode(&envelope.nonce),
             encrypted_key: B64.encode(&envelope.encrypted_key),
+            filename: None,
+            mime_type: None,
         };
 
-        let signer = crate::crypto::Ed25519Impl;
+        let signer = crate::crypto::FaestImpl;
         let payload_bytes = payload_to_bytes(&payload);
-        let sig = crate::crypto::PqSignature::sign(&signer, &payload_bytes, &ed_priv).unwrap();
+        let sig = crate::crypto::PqSignature::sign(&signer, &payload_bytes, &faest_priv).unwrap();
 
         let tx = Transaction {
             tx_id: new_uuid(),
             payload,
             sender_signature: B64.encode(&sig),
-            sender_pub_key: B64.encode(&ed_pub),
+            sender_pub_key: B64.encode(&faest_pub),
         };
 
         chain.add_block(&ch, tx).unwrap();
@@ -393,9 +440,9 @@ mod tests {
 
     #[test]
     fn test_redact_preserves_hash() {
-        let (ch, rsa_pub, ed_priv, ed_pub) = setup();
+        let (ch, rsa_pub, faest_priv, faest_pub) = setup();
         let mut chain = Blockchain::new();
-        chain.genesis_block(&ch, &rsa_pub, &ed_priv, &ed_pub).unwrap();
+        chain.genesis_block(&ch, &rsa_pub, &faest_priv, &faest_pub).unwrap();
 
         let original_hash = chain.blocks[0].hash.clone();
         chain.redact_block(0, &ch, "【已合规抹除】").unwrap();

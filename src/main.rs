@@ -30,6 +30,7 @@ use crypto::EnvelopeResult;
 use crypto::envelope_decrypt;
 use axum::extract::Path;
 use rsa::pkcs8::EncodePublicKey;
+use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -58,10 +59,16 @@ struct AppState {
 struct EncryptAndMineRequest {
     /// 待加密的明文内容
     plaintext: String,
+    /// 若为 true，则 `plaintext` 为 Base64 编码的二进制数据
+    plaintext_base64: Option<bool>,
     /// 发送者 FAEST 私钥，Base64 编码
     sender_private_key: String,
     /// 发送者 FAEST 公钥，Base64 编码
     sender_public_key: String,
+    /// 可选：原始文件名（若上传文件）
+    filename: Option<String>,
+    /// 可选：MIME 类型（若上传文件）
+    mime_type: Option<String>,
 }
 
 /// POST /redact 请求体
@@ -71,6 +78,10 @@ struct RedactRequest {
     block_index: usize,
     /// 合规删除标记文本（默认："【已合规抹除】"）
     redaction_label: Option<String>,
+    /// 管理员 FAEST 公钥（Base64）——用于节点验签
+    admin_public_key: Option<String>,
+    /// 管理员对本次修订操作的 FAEST 签名（Base64）
+    admin_signature: Option<String>,
 }
 
 /// GET /keys 响应体（FAEST 密钥对示例）
@@ -163,7 +174,17 @@ async fn encrypt_and_mine(
     };
 
     // 数字信封加密（使用 Admin RSA 公钥，使 Admin 可解密）
-    let envelope_result = match envelope_encrypt(req.plaintext.as_bytes(), &state.admin_rsa_pub) {
+    // 处理 plaintext 是否为 Base64 编码二进制
+    let plaintext_bytes: Vec<u8> = if req.plaintext_base64.unwrap_or(false) {
+        match base64::engine::general_purpose::STANDARD.decode(&req.plaintext) {
+            Ok(b) => b,
+            Err(e) => return internal_error(format!("plaintext Base64 解码失败: {}", e)).into_response(),
+        }
+    } else {
+        req.plaintext.as_bytes().to_vec()
+    };
+
+    let envelope_result = match envelope_encrypt(&plaintext_bytes, &state.admin_rsa_pub) {
         Ok(r) => r,
         Err(e) => return internal_error(e).into_response(),
     };
@@ -172,6 +193,8 @@ async fn encrypt_and_mine(
         ciphertext: B64.encode(&envelope_result.ciphertext),
         nonce: B64.encode(&envelope_result.nonce),
         encrypted_key: B64.encode(&envelope_result.encrypted_key),
+        filename: req.filename.clone(),
+        mime_type: req.mime_type.clone(),
     };
 
     // 对 Payload 进行 FAEST 签名（身份认证）
@@ -214,6 +237,16 @@ async fn redact_block(
         .redaction_label
         .unwrap_or_else(|| "【已合规抹除】".to_string());
 
+    // 校验 admin 签名参数是否存在
+    let admin_sig_b64 = match req.admin_signature {
+        Some(s) => s,
+        None => return internal_error("缺少 admin_signature，拒绝操作").into_response(),
+    };
+    let admin_pub_b64 = match req.admin_public_key {
+        Some(p) => p,
+        None => return internal_error("缺少 admin_public_key，拒绝操作").into_response(),
+    };
+
     let mut chain = state.chain.write().await;
     let original_hash = chain
         .blocks
@@ -221,6 +254,30 @@ async fn redact_block(
         .map(|b| b.hash.clone())
         .unwrap_or_default();
 
+    // 先重建要签名的内容字节（与前端 prepare 保持一致）
+    let new_content = match chain.redaction_content_bytes(req.block_index, &label) {
+        Ok(c) => c,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // 验证 admin 的 FAEST 签名（admin_pub_b64 + admin_sig_b64）
+    let admin_pub = match base64::engine::general_purpose::STANDARD.decode(&admin_pub_b64) {
+        Ok(b) => b,
+        Err(e) => return internal_error(format!("admin_public_key Base64 解码失败: {}", e)).into_response(),
+    };
+    let admin_sig = match base64::engine::general_purpose::STANDARD.decode(&admin_sig_b64) {
+        Ok(b) => b,
+        Err(e) => return internal_error(format!("admin_signature Base64 解码失败: {}", e)).into_response(),
+    };
+
+    let signer = FaestImpl;
+    match signer.verify(&new_content, &admin_sig, &admin_pub) {
+        Ok(true) => { /* 通过，继续 */ }
+        Ok(false) => return internal_error("管理员签名验证失败，拒绝修订").into_response(),
+        Err(e) => return internal_error(format!("管理员签名验证错误: {}", e)).into_response(),
+    }
+
+    // 验证通过后执行 redact
     match chain.redact_block(req.block_index, &state.ch, &label) {
         Ok(_) => {
             let updated_block = chain.blocks.get(req.block_index).cloned();
@@ -233,6 +290,49 @@ async fn redact_block(
             .into_response()
         }
         Err(e) => internal_error(e).into_response(),
+    }
+}
+
+// POST /redact_prepare — 生成要由 Admin 签名的消息（Base64）
+#[derive(Deserialize)]
+struct RedactPrepareRequest {
+    block_index: usize,
+    redaction_label: Option<String>,
+}
+
+async fn redact_prepare(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RedactPrepareRequest>,
+) -> impl IntoResponse {
+    let label = req.redaction_label.unwrap_or_else(|| "【已合规抹除】".to_string());
+    let chain = state.chain.read().await;
+    match chain.redaction_content_bytes(req.block_index, &label) {
+        Ok(content) => Json(serde_json::json!({ "message_base64": base64::engine::general_purpose::STANDARD.encode(&content) })).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+// POST /admin_sign — 使用 FAEST 私钥对任意消息签名（演示用；生产不要传私钥）
+#[derive(Deserialize)]
+struct AdminSignRequest {
+    private_key_base64: String,
+    message_base64: String,
+}
+
+async fn admin_sign(Json(req): Json<AdminSignRequest>) -> impl IntoResponse {
+    let priv_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.private_key_base64) {
+        Ok(b) => b,
+        Err(e) => return internal_error(format!("private_key Base64 解码失败: {}", e)).into_response(),
+    };
+    let msg = match base64::engine::general_purpose::STANDARD.decode(&req.message_base64) {
+        Ok(b) => b,
+        Err(e) => return internal_error(format!("message Base64 解码失败: {}", e)).into_response(),
+    };
+
+    let signer = FaestImpl;
+    match signer.sign(&msg, &priv_bytes) {
+        Ok(sig) => Json(serde_json::json!({ "signature_base64": base64::engine::general_purpose::STANDARD.encode(&sig) })).into_response(),
+        Err(e) => internal_error(format!("签名失败: {}", e)).into_response(),
     }
 }
 
@@ -285,6 +385,8 @@ async fn get_block_plain(
                 "success": true,
                 "plaintext_base64": B64.encode(&plain_bytes),
                 "plaintext_utf8": plain_utf8,
+                "filename": block.tx.payload.filename,
+                "mime_type": block.tx.payload.mime_type,
                 "block_index": index,
             })) .into_response()
         }
@@ -325,10 +427,46 @@ fn new_uuid() -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 初始化 Admin RSA 密钥对（变色龙哈希参数来源）
-    println!("🔑 正在生成 Admin RSA-2048 密钥对（用于变色龙哈希陷门）...");
-    let (admin_rsa_priv, admin_rsa_pub) = generate_rsa_keypair()?;
+    // 优化：将 Admin 私钥持久化到磁盘，保证重启后仍能解密此前上链的数字信封。
+    use std::path::Path;
+    use std::fs;
+    let admin_pem_path = Path::new("admin_rsa.pem");
+    println!("🔑 正在加载或生成 Admin RSA-2048 密钥对（用于变色龙哈希陷阱）...");
+    let (admin_rsa_priv, admin_rsa_pub) = if admin_pem_path.exists() {
+        // 尝试从 PEM 加载私钥
+        match fs::read_to_string(admin_pem_path) {
+            Ok(pem_str) => match rsa::RsaPrivateKey::from_pkcs1_pem(&pem_str) {
+                Ok(privk) => {
+                    let pubk = rsa::RsaPublicKey::from(&privk);
+                    println!("✅ 成功从 admin_rsa.pem 加载 Admin 私钥");
+                    (privk, pubk)
+                }
+                Err(e) => {
+                    println!("⚠️ 从 admin_rsa.pem 解析私钥失败，将重新生成：{}", e);
+                    let (p, pubk) = generate_rsa_keypair()?;
+                    // 覆写文件
+                    if let Ok(pem) = p.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF) { let _ = fs::write(admin_pem_path, pem); }
+                    (p, pubk)
+                }
+            },
+            Err(e) => {
+                println!("⚠️ 读取 admin_rsa.pem 失败，将重新生成：{}", e);
+                let (p, pubk) = generate_rsa_keypair()?;
+                if let Ok(pem) = p.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF) { let _ = fs::write(admin_pem_path, pem); }
+                (p, pubk)
+            }
+        }
+    } else {
+        // 文件不存在，生成并写入
+        let (p, pubk) = generate_rsa_keypair()?;
+        if let Ok(pem) = p.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF) {
+            let _ = fs::write(admin_pem_path, pem);
+            println!("✅ 新生成 Admin 私钥并写入 admin_rsa.pem");
+        }
+        (p, pubk)
+    };
+
     let ch = ChameleonHash::setup(&admin_rsa_priv);
-    println!("✅ 密钥生成完成");
 
     // 初始化区块链并生成创世块（使用 FAEST 密钥作为创世签名示例）
     println!("⛓  正在初始化区块链并生成创世块...");
@@ -350,6 +488,8 @@ async fn main() -> Result<()> {
         .route("/keys", get(get_keys))
         .route("/faest_keys", get(get_faest_keys))
         .route("/chain", get(get_chain))
+        .route("/redact_prepare", post(redact_prepare))
+        .route("/admin_sign", post(admin_sign))
         .route("/block_plain/:index", get(get_block_plain))
         .route("/encrypt_and_mine", post(encrypt_and_mine))
         .route("/redact", post(redact_block))

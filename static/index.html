@@ -54,28 +54,21 @@
     <!-- 密钥工具 -->
     <div class="mb-4 p-4 bg-gray-800/60 rounded-xl border border-gray-700/50">
       <div class="flex items-center justify-between mb-3">
-        <span class="text-sm text-gray-400 font-medium">🔑 身份密钥对（FAEST）</span>
-        <button id="btn-gen-keys"
-          class="text-xs bg-indigo-700 hover:bg-indigo-600 transition px-3 py-1.5 rounded-lg font-medium">
-          生成临时密钥
-        </button>
-      </div>
-      <div class="flex items-center justify-between mb-3">
-        <span class="text-sm text-gray-400 font-medium">🔑 后量子密钥对（FAEST）</span>
+        <span class="text-sm text-gray-400 font-medium">🔑 FAEST 密钥对（自动填充）</span>
         <button id="btn-gen-faest-keys"
           class="text-xs bg-amber-700 hover:bg-amber-600 transition px-3 py-1.5 rounded-lg font-medium">
-          生成 FAEST 密钥
+          生成 FAEST 密钥并填充（用户 & Admin）
         </button>
       </div>
       <div class="grid grid-cols-1 gap-2">
         <div>
-          <label class="text-xs text-gray-500">私钥 (Base64 · 32B)</label>
-          <input id="inp-privkey" type="text" placeholder="点击"生成临时密钥"填充..."
+          <label class="text-xs text-gray-500">私钥 (Base64)</label>
+          <input id="inp-privkey" type="text" readonly
             class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-green-400 mt-1 outline-none focus:border-blue-600 transition" />
         </div>
         <div>
-          <label class="text-xs text-gray-500">公钥 (Base64 · 32B)</label>
-          <input id="inp-pubkey" type="text" placeholder="点击"生成临时密钥"填充..."
+          <label class="text-xs text-gray-500">公钥 (Base64)</label>
+          <input id="inp-pubkey" type="text" readonly
             class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-blue-400 mt-1 outline-none focus:border-blue-600 transition" />
         </div>
       </div>
@@ -87,6 +80,16 @@
       <textarea id="inp-plaintext" rows="4" placeholder="在此输入机密文件内容..."
         class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm mt-2 outline-none focus:border-blue-600 transition resize-none">
       </textarea>
+    </div>
+
+    <!-- 文件上传 -->
+    <div class="mb-4">
+      <label class="text-sm text-gray-400 font-medium">📁 上传任意文件（以二进制形式保存）</label>
+      <div class="flex items-center gap-2">
+        <input id="inp-file" type="file" class="flex-1 mt-2 text-xs" />
+        <button id="btn-clear-file" class="ml-2 text-xs bg-red-700 hover:bg-red-600 px-2 py-1 rounded">删除文件</button>
+      </div>
+      <p id="file-info" class="text-xs text-gray-500 mt-1">未选择文件</p>
     </div>
 
     <!-- 上链按钮 -->
@@ -172,6 +175,23 @@
       </div>
     </div>
 
+    <div class="mb-4 p-4 bg-gray-800/30 rounded-xl border border-gray-700/40 text-xs">
+      <p class="text-xs text-gray-400 mb-2">管理员签名（演示）</p>
+      <div class="grid grid-cols-1 gap-2">
+        <div>
+          <label class="text-xs text-gray-500">Admin 私钥（Base64，用于生成签名）</label>
+          <input id="inp-admin-priv" type="text" placeholder="可填写 Admin FAEST 私钥（Base64）"
+            class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-yellow-300 mt-1 outline-none focus:border-amber-600 transition" />
+        </div>
+        <div>
+          <label class="text-xs text-gray-500">Admin 公钥（Base64，用于服务器验签）</label>
+          <input id="inp-admin-pub" type="text" placeholder="Admin FAEST 公钥（Base64）"
+            class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-yellow-300 mt-1 outline-none focus:border-amber-600 transition" />
+        </div>
+      </div>
+      <p class="text-xs text-gray-500 mt-2">说明：本演示允许在前端填写 Admin 私钥并通过后端签名接口生成签名。生产环境请勿在客户端传输私钥。</p>
+    </div>
+
     <button id="btn-redact"
       class="w-full bg-amber-700 hover:bg-amber-600 active:bg-amber-800 transition font-semibold py-3 rounded-xl text-sm shadow-lg shadow-amber-700/20 flex items-center justify-center gap-2">
       <span>🗑️</span> 物理抹除（合规修订）
@@ -232,32 +252,29 @@ function showToast(msg, ok=true) {
 }
 
 // ── 生成密钥对 ────────────────────────────────────────────
-
-$('btn-gen-keys').addEventListener('click', async () => {
-  try {
-    const res = await fetch('/keys');
-    const data = await res.json();
-    $('inp-privkey').value = data.faest_private_key;
-    $('inp-pubkey').value  = data.faest_public_key;
-    showToast('✅ FAEST 临时密钥对已生成');
-  } catch(e) {
-    showToast('❌ 密钥生成失败: ' + e.message, false);
-  }
-});
-
-// 生成 FAEST 密钥对（只在前端展示 Base64，便于切换测试）
-$('btn-gen-faest-keys').addEventListener('click', async () => {
+// 生成 FAEST 密钥对并自动填充用户与 Admin 字段（演示）
+async function genFaestKeys() {
   try {
     const res = await fetch('/faest_keys');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    // 简单展示：复制到剪切板
-    const txt = `FAEST 公钥: ${data.faest_public_key}\nFAEST 私钥: ${data.faest_private_key}`;
-    await navigator.clipboard.writeText(txt);
-    showToast('✅ FAEST 密钥已生成并复制到剪贴板');
+    // 填充发送方密钥
+    if ($('inp-privkey')) $('inp-privkey').value = data.faest_private_key || '';
+    if ($('inp-pubkey'))  $('inp-pubkey').value  = data.faest_public_key || '';
+    // 同时填充 Admin 密钥字段（演示用途）
+    if ($('inp-admin-priv')) $('inp-admin-priv').value = data.faest_private_key || '';
+    if ($('inp-admin-pub'))  $('inp-admin-pub').value  = data.faest_public_key || '';
+    showToast('✅ FAEST 密钥已生成并填充（用户 & Admin）');
   } catch(e) {
-    showToast('❌ FAEST 密钥生成失败: ' + e.message, false);
+    console.error('genFaestKeys error', e);
+    showToast('❌ FAEST 密钥生成失败: ' + (e.message || e), false);
   }
-});
+}
+
+// 绑定生成按钮（在脚本加载完成后设置，避免 inline handler 问题）
+if ($('btn-gen-faest-keys')) {
+  $('btn-gen-faest-keys').addEventListener('click', genFaestKeys);
+}
 
 // ── 加密并上链 ────────────────────────────────────────────
 
@@ -274,7 +291,9 @@ $('btn-encrypt-mine').addEventListener('click', async () => {
   const privKey   = $('inp-privkey').value.trim();
   const pubKey    = $('inp-pubkey').value.trim();
 
-  if (!plaintext) { showToast('❌ 请输入明文内容', false); return; }
+  const fileInput = $('inp-file');
+  const hasFile = fileInput && fileInput.files && fileInput.files.length > 0;
+  if (!hasFile && !plaintext) { showToast('❌ 请输入明文内容或选择文件上传', false); return; }
   if (!privKey || !pubKey) { showToast('❌ 请先生成或填写密钥对', false); return; }
 
   // 展示进度面板
@@ -291,10 +310,30 @@ $('btn-encrypt-mine').addEventListener('click', async () => {
   // 等待后端完成变色龙哈希计算（step-ch 保持 active 状态，直到服务器响应）
 
   try {
+    // 如果有文件被选择，优先上传文件（二进制 -> base64）
+    let body;
+    if (hasFile) {
+      const f = fileInput.files[0];
+      // Use FileReader.readAsDataURL to get a safe base64 encoding for arbitrary binary files
+      const readDataUrl = () => new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = (e) => reject(e);
+        fr.readAsDataURL(f);
+      });
+      const dataUrl = await readDataUrl();
+      // data:[<mediatype>][;base64],<data>
+      const parts = dataUrl.split(',');
+      const b64 = parts[1] || '';
+      body = JSON.stringify({ plaintext_base64: true, plaintext: b64, filename: f.name, mime_type: f.type || null, sender_private_key: privKey, sender_public_key: pubKey });
+    } else {
+      body = JSON.stringify({ plaintext_base64: false, plaintext: plaintext, sender_private_key: privKey, sender_public_key: pubKey });
+    }
+
     const res  = await fetch('/encrypt_and_mine', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ plaintext, sender_private_key: privKey, sender_public_key: pubKey })
+      body
     });
     const data = await res.json();
 
@@ -388,8 +427,27 @@ async function viewPlain(index) {
     const res = await fetch(`/block_plain/${index}`);
     const data = await res.json();
     if (data.success) {
-      const text = data.plaintext_utf8 || atob(data.plaintext_base64);
-      el.textContent = text;
+      // 如果后端返回 filename，则视为二进制文件，触发下载
+      if (data.filename && data.plaintext_base64) {
+        const b64 = data.plaintext_base64;
+        const byteChars = atob(b64);
+        const byteNumbers = new Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray], { type: data.mime_type || 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = data.filename || `block_${index}.bin`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        el.textContent = `已下载: ${data.filename || `block_${index}.bin`}`;
+      } else {
+        const text = data.plaintext_utf8 || (data.plaintext_base64 ? atob(data.plaintext_base64) : '');
+        el.textContent = text;
+      }
     } else {
       el.textContent = '解密失败';
       showToast('❌ 解密失败', false);
@@ -402,7 +460,42 @@ async function viewPlain(index) {
 
 $('btn-refresh').addEventListener('click', loadChain);
 
+// 手动检查链完整性（触发一次 /chain 请求并突出显示）
+const btnCheck = document.createElement('button');
+btnCheck.className = 'ml-2 text-xs bg-green-700 hover:bg-green-600 transition px-3 py-1.5 rounded';
+btnCheck.textContent = '检查链完整性';
+btnCheck.addEventListener('click', async () => {
+  await loadChain();
+  showToast('✅ 已完成链完整性检查');
+});
+document.querySelector('#btn-refresh').after(btnCheck);
+
+// 文件选择显示
+const _inpFile = $('inp-file');
+if (_inpFile) {
+  _inpFile.addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) {
+      $('file-info').textContent = `${f.name} · ${f.size} bytes`;
+      // 当选中文件时禁用明文输入以避免混淆
+      $('inp-plaintext').disabled = true;
+    } else {
+      $('file-info').textContent = '未选择文件';
+      $('inp-plaintext').disabled = false;
+    }
+  });
+}
+
 // ── 合规修订 ──────────────────────────────────────────────
+// 清除已选文件按钮处理：清空 input，恢复明文输入
+$('btn-clear-file').addEventListener('click', (e) => {
+  e.preventDefault();
+  const fi = $('inp-file');
+  if (!fi) return;
+  fi.value = ''; // 清除已选文件（兼容多数浏览器）
+  $('file-info').textContent = '未选择文件';
+  $('inp-plaintext').disabled = false;
+});
 
 $('btn-redact').addEventListener('click', async () => {
   const blockIndex    = parseInt($('inp-redact-index').value);
@@ -426,10 +519,31 @@ $('btn-redact').addEventListener('click', async () => {
   } catch(_) {}
 
   try {
-    const res  = await fetch('/redact', {
+    // Step 1: 向后端请求待签名的 canonical message
+    const prepRes = await fetch('/redact_prepare', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ block_index: blockIndex, redaction_label: redactLabel })
+    });
+    const prep = await prepRes.json();
+    const message_b64 = prep.message_base64;
+
+    // Step 2: 使用 Admin 私钥向后端请求签名（演示）
+    const adminPriv = $('inp-admin-priv').value.trim();
+    const adminPub  = $('inp-admin-pub').value.trim();
+    if (!adminPriv || !adminPub) { showToast('❌ 请填写 Admin 私钥与公钥以签名修订', false); return; }
+
+    const signRes = await fetch('/admin_sign', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ private_key_base64: adminPriv, message_base64: message_b64 })
+    });
+    const signJson = await signRes.json();
+    const admin_sig_b64 = signJson.signature_base64;
+
+    // Step 3: 提交 redact 请求并附带 admin 公钥与签名
+    const res = await fetch('/redact', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ block_index: blockIndex, redaction_label: redactLabel })
+      body: JSON.stringify({ block_index: blockIndex, redaction_label: redactLabel, admin_public_key: adminPub, admin_signature: admin_sig_b64 })
     });
     const data = await res.json();
 

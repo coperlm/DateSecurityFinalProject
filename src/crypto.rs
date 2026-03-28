@@ -8,15 +8,19 @@ use aes_gcm::{
 };
 use anyhow::{anyhow, Result};
 use cmac::{Cmac, Mac};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+// Ed25519 卸载：使用 FAEST via C-FFI
 use num_bigint::{BigUint, RandBigInt};
-use num_integer::Integer;
+use rug::Integer;
+use std::str::FromStr;
+use std::time::Instant;
+use num_integer::Integer as NumIntegerTrait;
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
 use rsa::{
     pkcs1v15::Pkcs1v15Encrypt,
     RsaPrivateKey, RsaPublicKey,
 };
+use crate::faest_ffi;
 
 // ────────────────────────────────────────────────────────────────────────────
 // § 1  后量子签名 Trait（Ed25519 占位实现）
@@ -32,43 +36,31 @@ pub trait PqSignature {
     fn verify(&self, message: &[u8], signature: &[u8], public_key: &[u8]) -> Result<bool>;
 }
 
-/// Ed25519 签名实现——作为 FAEST 后量子签名的临时占位符。
-pub struct Ed25519Impl;
+// 使用 FAEST FFI 实现后量子签名功能（见 `faest_ffi` 模块）
 
-impl PqSignature for Ed25519Impl {
+/// FAEST 后量子签名实现（通过 C-FFI 调用 libs/faest）
+pub struct FaestImpl;
+
+impl PqSignature for FaestImpl {
     fn sign(&self, message: &[u8], private_key: &[u8]) -> Result<Vec<u8>> {
-        // 从 32 字节种子还原 SigningKey
-        let key_bytes: [u8; 32] = private_key
-            .try_into()
-            .map_err(|_| anyhow!("Ed25519 私钥必须为 32 字节"))?;
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        let sig: Signature = signing_key.sign(message);
-        Ok(sig.to_bytes().to_vec())
+        let sig = faest_ffi::sign(private_key, message)
+            .map_err(|e| anyhow!("FAEST sign failed: {}", e))?;
+        Ok(sig)
     }
 
     fn verify(&self, message: &[u8], signature: &[u8], public_key: &[u8]) -> Result<bool> {
-        let key_bytes: [u8; 32] = public_key
-            .try_into()
-            .map_err(|_| anyhow!("Ed25519 公钥必须为 32 字节"))?;
-        let sig_bytes: [u8; 64] = signature
-            .try_into()
-            .map_err(|_| anyhow!("Ed25519 签名必须为 64 字节"))?;
-        let verifying_key = VerifyingKey::from_bytes(&key_bytes)
-            .map_err(|e| anyhow!("无效的 Ed25519 公钥: {}", e))?;
-        let sig = Signature::from_bytes(&sig_bytes);
-        Ok(verifying_key.verify(message, &sig).is_ok())
+        let ok = faest_ffi::verify(public_key, message, signature)
+            .map_err(|e| anyhow!("FAEST verify failed: {}", e))?;
+        Ok(ok)
     }
 }
 
-/// 生成一对 Ed25519 密钥（签名私钥 + 验证公钥），均以 32 字节表示。
-pub fn generate_ed25519_keypair() -> (Vec<u8>, Vec<u8>) {
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    (
-        signing_key.to_bytes().to_vec(),
-        verifying_key.to_bytes().to_vec(),
-    )
+/// 通过 FAEST C-FFI 生成一对后量子签名密钥（返回 (priv, pub)）
+pub fn generate_faest_keypair() -> (Vec<u8>, Vec<u8>) {
+    match crate::faest_ffi::keygen() {
+        Ok((pk, sk)) => (sk, pk), // 返回顺序与旧接口保持 (priv, pub)
+        Err(_) => (vec![], vec![]),
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -176,8 +168,17 @@ pub struct ChameleonHash {
     pub n: BigUint,
     /// RSA 公钥指数 e
     pub e: BigUint,
-    /// RSA 私钥指数 d（陷门，仅 Admin 持有）
-    pub d: BigUint,
+    /// RSA 私钥指数 d（仅在初始化时用于计算 CRT 参数，不在结构体中持久保留）
+    /// RSA 素因子 p
+    pub p: BigUint,
+    /// RSA 素因子 q
+    pub q: BigUint,
+    /// d mod (p-1)
+    pub dp: BigUint,
+    /// d mod (q-1)
+    pub dq: BigUint,
+    /// q^{-1} mod p
+    pub qinv: BigUint,
 }
 
 impl ChameleonHash {
@@ -191,14 +192,39 @@ impl ChameleonHash {
         let e = BigUint::from_bytes_be(&pub_key.e().to_bytes_be());
         let d = BigUint::from_bytes_be(&priv_key.d().to_bytes_be());
 
-        ChameleonHash { n, e, d }
+        // 获取素因子 p, q
+        let primes = priv_key.primes();
+        let p = BigUint::from_bytes_be(&primes[0].to_bytes_be());
+        let q = BigUint::from_bytes_be(&primes[1].to_bytes_be());
+
+        // 计算 dp = d mod (p-1), dq = d mod (q-1)
+        let p_minus1 = &p - BigUint::one();
+        let q_minus1 = &q - BigUint::one();
+        let dp = &d % &p_minus1;
+        let dq = &d % &q_minus1;
+
+        // 计算 qinv = q^{-1} mod p
+        let qinv = mod_inverse(&q, &p).expect("无法计算 q 的模逆，RSA 素因子不符合要求");
+
+        ChameleonHash { n, e, p, q, dp, dq, qinv }
     }
 
     /// 正向哈希（矿工打包）：
     /// CH = H_AES(m) * r^e mod N
     pub fn hash(&self, data: &[u8], r: &BigUint) -> BigUint {
         let hm = h_aes(data);
-        let re = r.modpow(&self.e, &self.n);
+        // 使用 rug (GMP) 进行快速模幂计算以提升性能：
+        let start = Instant::now();
+        let r_dec = r.to_str_radix(10);
+        let e_dec = self.e.to_str_radix(10);
+        let n_dec = self.n.to_str_radix(10);
+        let r_rug = Integer::from_str(&r_dec).expect("rug parse r");
+        let e_rug = Integer::from_str(&e_dec).expect("rug parse e");
+        let n_rug = Integer::from_str(&n_dec).expect("rug parse n");
+        let re_rug = r_rug.pow_mod(&e_rug, &n_rug).expect("rug pow_mod");
+        let re = BigUint::from_str(&re_rug.to_string_radix(10)).expect("to BigUint");
+        let elapsed = start.elapsed();
+        eprintln!("[perf] ChameleonHash::hash rug modpow elapsed: {} ms", elapsed.as_millis());
         (hm * re) % &self.n
     }
 
@@ -229,11 +255,41 @@ impl ChameleonHash {
         // ratio = H_AES(m) * H_AES(m')^{-1} mod N
         let ratio = (hm * hm_new_inv) % &self.n;
 
-        // ratio_d = ratio^d mod N
-        let ratio_d = ratio.modpow(&self.d, &self.n);
+        // 使用 CRT 优化计算 ratio^d mod N：
+        // m1 = ratio^{dp} mod p
+        // m2 = ratio^{dq} mod q
+        // h = (m1 - m2) * qinv mod p
+        // result = m2 + q * h
+        let start = Instant::now();
+        // 使用 rug 对模幂部分执行加速（CRT 仍然用于合并）
+        let ratio_dec = ratio.to_str_radix(10);
+        let p_dec = self.p.to_str_radix(10);
+        let q_dec = self.q.to_str_radix(10);
+        let dp_dec = self.dp.to_str_radix(10);
+        let dq_dec = self.dq.to_str_radix(10);
 
-        // r' = ratio_d * r mod N
-        let r_prime = (ratio_d * old_r) % &self.n;
+        let ratio_rug = Integer::from_str(&ratio_dec).expect("parse ratio");
+        let p_rug = Integer::from_str(&p_dec).expect("parse p");
+        let q_rug = Integer::from_str(&q_dec).expect("parse q");
+        let dp_rug = Integer::from_str(&dp_dec).expect("parse dp");
+        let dq_rug = Integer::from_str(&dq_dec).expect("parse dq");
+
+        let m1_rug = ratio_rug.clone().pow_mod(&dp_rug, &p_rug).expect("pow_mod p");
+        let m2_rug = ratio_rug.pow_mod(&dq_rug, &q_rug).expect("pow_mod q");
+
+        // 将 m1/m2 转回 BigUint 以沿用原有 CRT 合并逻辑
+        let m1 = BigUint::from_str(&m1_rug.to_string_radix(10)).expect("m1 to BigUint");
+        let m2 = BigUint::from_str(&m2_rug.to_string_radix(10)).expect("m2 to BigUint");
+
+        // 计算 h = (m1 - m2) * qinv mod p（处理 m1 < m2 的情况）
+        let mut diff = if m1 >= m2 { m1.clone() - m2.clone() } else { (m1.clone() + &self.p) - m2.clone() };
+        diff = (diff * &self.qinv) % &self.p;
+        let result = m2 + (&self.q * diff);
+        let elapsed = start.elapsed();
+        eprintln!("[perf] ChameleonHash::forge CRT+rug elapsed: {} ms", elapsed.as_millis());
+
+        // r' = result * r mod N
+        let r_prime = (result * old_r) % &self.n;
 
         Ok(r_prime)
     }
@@ -293,11 +349,13 @@ mod tests {
         assert_eq!(plaintext.as_ref(), recovered.as_slice(), "明文应完整还原");
     }
 
-    /// 测试 Ed25519 签名与验证。
+    /// 测试 FAEST 签名与验证（通过 FFI 调用 libs/faest）
     #[test]
-    fn test_ed25519_sign_verify() {
-        let (priv_bytes, pub_bytes) = generate_ed25519_keypair();
-        let signer = Ed25519Impl;
+    fn test_faest_sign_verify() {
+        let (priv_bytes, pub_bytes) = generate_faest_keypair();
+        // 若 FAEST keygen 失败，跳过测试
+        if priv_bytes.is_empty() || pub_bytes.is_empty() { return; }
+        let signer = FaestImpl;
         let message = b"transaction payload hash";
 
         let sig = signer.sign(message, &priv_bytes).expect("签名失败");

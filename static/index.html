@@ -54,10 +54,17 @@
     <!-- 密钥工具 -->
     <div class="mb-4 p-4 bg-gray-800/60 rounded-xl border border-gray-700/50">
       <div class="flex items-center justify-between mb-3">
-        <span class="text-sm text-gray-400 font-medium">🔑 身份密钥对（Ed25519）</span>
+        <span class="text-sm text-gray-400 font-medium">🔑 身份密钥对（FAEST）</span>
         <button id="btn-gen-keys"
           class="text-xs bg-indigo-700 hover:bg-indigo-600 transition px-3 py-1.5 rounded-lg font-medium">
           生成临时密钥
+        </button>
+      </div>
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-sm text-gray-400 font-medium">🔑 后量子密钥对（FAEST）</span>
+        <button id="btn-gen-faest-keys"
+          class="text-xs bg-amber-700 hover:bg-amber-600 transition px-3 py-1.5 rounded-lg font-medium">
+          生成 FAEST 密钥
         </button>
       </div>
       <div class="grid grid-cols-1 gap-2">
@@ -94,7 +101,7 @@
       <div class="space-y-2">
         <div id="step-aes"    class="text-xs step-wait flex items-center gap-2"><span>○</span> AES-256-GCM 对称加密明文</div>
         <div id="step-rsa"    class="text-xs step-wait flex items-center gap-2"><span>○</span> RSA 公钥封装 AES 密钥（数字信封）</div>
-        <div id="step-sig"    class="text-xs step-wait flex items-center gap-2"><span>○</span> Ed25519 签名 Payload（身份认证）</div>
+        <div id="step-sig"    class="text-xs step-wait flex items-center gap-2"><span>○</span> FAEST 签名 Payload（身份认证）</div>
         <div id="step-cmac"   class="text-xs step-wait flex items-center gap-2"><span>○</span> AES-128-CMAC 压缩区块数据</div>
         <div id="step-ch"     class="text-xs step-wait flex items-center gap-2"><span>○</span> 变色龙哈希 CH = H(m)·r^e mod N</div>
         <div id="step-chain"  class="text-xs step-wait flex items-center gap-2"><span>○</span> 区块追加上链</div>
@@ -204,7 +211,7 @@
 
 <!-- ══════════════════════ Footer ══════════════════════ -->
 <footer class="max-w-5xl mx-auto mt-10 text-center text-gray-700 text-xs">
-  <p>DateSecurityFinalProject · AES-256-GCM + RSA-2048 + AES-128-CMAC + Chameleon Hash + Ed25519</p>
+  <p>DateSecurityFinalProject · AES-256-GCM + RSA-2048 + AES-128-CMAC + Chameleon Hash + FAEST</p>
   <p class="mt-1">后量子签名扩展注释：此处未来将通过 C-FFI 接入 FAEST 后量子签名算法</p>
 </footer>
 
@@ -230,11 +237,25 @@ $('btn-gen-keys').addEventListener('click', async () => {
   try {
     const res = await fetch('/keys');
     const data = await res.json();
-    $('inp-privkey').value = data.ed25519_private_key;
-    $('inp-pubkey').value  = data.ed25519_public_key;
-    showToast('✅ Ed25519 临时密钥对已生成');
+    $('inp-privkey').value = data.faest_private_key;
+    $('inp-pubkey').value  = data.faest_public_key;
+    showToast('✅ FAEST 临时密钥对已生成');
   } catch(e) {
     showToast('❌ 密钥生成失败: ' + e.message, false);
+  }
+});
+
+// 生成 FAEST 密钥对（只在前端展示 Base64，便于切换测试）
+$('btn-gen-faest-keys').addEventListener('click', async () => {
+  try {
+    const res = await fetch('/faest_keys');
+    const data = await res.json();
+    // 简单展示：复制到剪切板
+    const txt = `FAEST 公钥: ${data.faest_public_key}\nFAEST 私钥: ${data.faest_private_key}`;
+    await navigator.clipboard.writeText(txt);
+    showToast('✅ FAEST 密钥已生成并复制到剪贴板');
+  } catch(e) {
+    showToast('❌ FAEST 密钥生成失败: ' + e.message, false);
   }
 });
 
@@ -345,12 +366,37 @@ async function loadChain() {
             <span class="text-gray-500 shrink-0 w-20">Tx ID</span>
             <span class="text-gray-400 break-all">${b.tx.tx_id}</span>
           </div>
+          <div class="flex gap-2 mt-2">
+            <button class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded" onclick="viewPlain(${b.index})">🔍 查看明文</button>
+            <span id="block-plain-${b.index}" class="mono text-xs text-gray-300 ml-3 break-all"></span>
+          </div>
         </div>
       </div>
     `).join('');
 
   } catch(e) {
     showToast('❌ 链数据加载失败: ' + e.message, false);
+  }
+}
+
+// 在区块下显示解密明文（调用后端）
+async function viewPlain(index) {
+  const el = document.getElementById(`block-plain-${index}`);
+  if (!el) return;
+  el.textContent = '正在解密...';
+  try {
+    const res = await fetch(`/block_plain/${index}`);
+    const data = await res.json();
+    if (data.success) {
+      const text = data.plaintext_utf8 || atob(data.plaintext_base64);
+      el.textContent = text;
+    } else {
+      el.textContent = '解密失败';
+      showToast('❌ 解密失败', false);
+    }
+  } catch(e) {
+    el.textContent = '请求失败';
+    showToast('❌ 请求失败: ' + e.message, false);
   }
 }
 

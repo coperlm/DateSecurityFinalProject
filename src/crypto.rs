@@ -15,8 +15,8 @@ use num_bigint::{BigUint, RandBigInt};
 use num_integer::Integer;
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
-use rsa::{pkcs1v15::Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use rsa::traits::PublicKeyParts;
+use rsa::{pkcs1v15::Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use std::time::Instant;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -24,7 +24,7 @@ use std::time::Instant;
 // ────────────────────────────────────────────────────────────────────────────
 
 /// 后量子签名算法的统一抽象接口。
-/// 此处未来将通过 C-FFI 接入 FAEST 后量子签名算法。
+/// 目前通过 C-FFI 在 `FaestImpl` 中已集成 FAEST 签名实现。
 pub trait PqSignature {
     /// 对消息 `message` 进行签名，返回签名字节。
     fn sign(&self, message: &[u8], private_key: &[u8]) -> Result<Vec<u8>>;
@@ -117,7 +117,9 @@ pub fn envelope_decrypt(
     let enc_len = envelope.encrypted_key.len();
     let modulus_len = rsa_priv_key.n().to_bytes_be().len();
     if enc_len != modulus_len {
-        return Err(anyhow!("RSA 解密 AES 密钥失败: encrypted_key 长度与 RSA 模数长度不匹配"));
+        return Err(anyhow!(
+            "RSA 解密 AES 密钥失败: encrypted_key 长度与 RSA 模数长度不匹配"
+        ));
     }
 
     let aes_key_bytes = rsa_priv_key

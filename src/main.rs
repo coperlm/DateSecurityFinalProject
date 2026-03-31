@@ -14,9 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 
-use crypto::{ChameleonHash, generate_rsa_keypair};
-use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 use crate::state::AppState;
+use crypto::{generate_rsa_keypair, ChameleonHash};
+use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -88,7 +88,10 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(serve_index))
-        .route("/health", get(|| async { (StatusCode::OK, Json(serde_json::json!({"ok": true}))) }))
+        .route(
+            "/health",
+            get(|| async { (StatusCode::OK, Json(serde_json::json!({"ok": true}))) }),
+        )
         .route("/keys", get(handlers::get_keys))
         .route("/faest_keys", get(handlers::get_faest_keys))
         .route("/faest_admin_exists", get(handlers::faest_admin_exists))

@@ -19,12 +19,15 @@ pub struct Progress {
     pub success: Option<bool>,
     pub result: Option<serde_json::Value>,
     pub last_update: String,
+    pub created_at: i64,
 }
 
-static PROGRESS_STORE: Lazy<Mutex<HashMap<String, Progress>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static PROGRESS_STORE: Lazy<Mutex<HashMap<String, Progress>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn create_progress(op_id: String, step_names: &[&str]) {
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let now_str = now.to_rfc3339();
     let steps = step_names
         .iter()
         .map(|name| ProgressStep {
@@ -39,7 +42,8 @@ pub fn create_progress(op_id: String, step_names: &[&str]) {
         done: false,
         success: None,
         result: None,
-        last_update: now,
+        last_update: now_str.clone(),
+        created_at: now.timestamp(),
     };
 
     let mut store = PROGRESS_STORE.lock().unwrap();
@@ -69,7 +73,14 @@ pub fn set_progress_done(op_id: &str, success: bool, result: Option<serde_json::
     }
 }
 
+pub fn cleanup_progress(ttl_seconds: i64) {
+    let mut store = PROGRESS_STORE.lock().unwrap();
+    let now = Utc::now().timestamp();
+    store.retain(|_, p| now - p.created_at <= ttl_seconds);
+}
+
 pub fn get_progress(op_id: &str) -> Option<Progress> {
+    cleanup_progress(600); // 10 minutes
     let store = PROGRESS_STORE.lock().unwrap();
     store.get(op_id).cloned()
 }

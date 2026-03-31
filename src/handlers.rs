@@ -1,28 +1,33 @@
 use crate::chain::{EncryptedPayload, Transaction};
-use crate::crypto::{envelope_decrypt, envelope_encrypt, generate_faest_keypair, generate_rsa_keypair, EnvelopeResult, FaestImpl, PqSignature};
+use crate::crypto::{
+    envelope_decrypt, envelope_encrypt, generate_faest_keypair, generate_rsa_keypair,
+    EnvelopeResult, FaestImpl, PqSignature,
+};
 use crate::faest_ffi;
 use crate::progress;
-use crate::state::{AppState, new_uuid};
+use crate::state::{new_uuid, AppState};
 use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use chrono::Utc;
-use tokio::time::timeout;
-use std::time::Duration;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use chrono::Utc;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
-use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::pkcs8::EncodePublicKey;
+use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use std::time::Duration;
+use tokio::time::timeout;
 
 static LAST_ERRORS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 fn record_error(err: String) {
     let mut store = LAST_ERRORS.lock().unwrap();
     store.push(err);
-    while store.len() > 50 { store.remove(0); }
+    while store.len() > 50 {
+        store.remove(0);
+    }
 }
 
 fn trace(msg: &str) {
@@ -56,16 +61,30 @@ pub struct KeysResponse {
 
 #[derive(Serialize)]
 pub struct ErrorResponse {
-    pub error: String,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+pub fn error_response(
+    code: &str,
+    message: impl std::fmt::Display,
+    status: StatusCode,
+    metadata: Option<serde_json::Value>,
+) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        status,
+        Json(ErrorResponse {
+            code: code.to_string(),
+            message: message.to_string(),
+            metadata,
+        }),
+    )
 }
 
 pub fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: e.to_string(),
-        }),
-    )
+    error_response("internal_error", e, StatusCode::INTERNAL_SERVER_ERROR, None)
 }
 
 pub async fn get_keys() -> impl IntoResponse {
@@ -115,7 +134,15 @@ pub async fn get_block_plain(
     let chain = state.chain.read().await;
     let block = chain.blocks.get(index);
     if block.is_none() {
-        return (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("区块 {} 不存在", index) })).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: "block_not_found".to_string(),
+                message: format!("区块 {} 不存在", index),
+                metadata: None,
+            }),
+        )
+            .into_response();
     }
     let block = block.unwrap().clone();
 
@@ -133,12 +160,15 @@ pub async fn get_block_plain(
             "filename": block.tx.payload.filename,
             "mime_type": block.tx.payload.mime_type,
             "block_index": index,
-        })).into_response();
+        }))
+        .into_response();
     }
 
     let ciphertext = match B64.decode(&block.tx.payload.ciphertext) {
         Ok(b) => b,
-        Err(e) => return internal_error(format!("payload ciphertext 解码失败: {}", e)).into_response(),
+        Err(e) => {
+            return internal_error(format!("payload ciphertext 解码失败: {}", e)).into_response()
+        }
     };
     let nonce = match B64.decode(&block.tx.payload.nonce) {
         Ok(b) => b,
@@ -149,7 +179,11 @@ pub async fn get_block_plain(
         Err(e) => return internal_error(format!("encrypted_key 解码失败: {}", e)).into_response(),
     };
 
-    let envelope = EnvelopeResult { ciphertext, nonce, encrypted_key };
+    let envelope = EnvelopeResult {
+        ciphertext,
+        nonce,
+        encrypted_key,
+    };
     match envelope_decrypt(&envelope, &state.admin_rsa_priv) {
         Ok(plain_bytes) => {
             let plain_utf8 = String::from_utf8(plain_bytes.clone()).ok();
@@ -170,7 +204,11 @@ pub async fn get_block_plain(
 pub async fn get_progress(Path(id): Path<String>) -> impl IntoResponse {
     match progress::get_progress(&id) {
         Some(p) => Json(serde_json::json!({"ok": true, "progress": p})).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"ok": false, "error": "op_id not found"}))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"ok": false, "error": "op_id not found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -184,11 +222,27 @@ pub async fn get_faest_admin_keys() -> impl IntoResponse {
     let pubp = std::path::Path::new("data/admin_faest_pub.b64");
     let privp = std::path::Path::new("data/admin_faest_priv.b64");
     if !pubp.exists() || !privp.exists() {
-        return (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Admin FAEST keys not found".to_string() })).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                code: "faest_keys_not_found".to_string(),
+                message: "Admin FAEST keys not found".to_string(),
+                metadata: None,
+            }),
+        )
+            .into_response();
     }
-    match (std::fs::read_to_string(privp), std::fs::read_to_string(pubp)) {
-        (Ok(privs), Ok(pubs)) => Json(serde_json::json!({"faest_private_key": privs.trim(), "faest_public_key": pubs.trim()})).into_response(),
-        (Err(e), _) | (_, Err(e)) => internal_error(format!("读取 Admin FAEST 密钥失败: {}", e)).into_response(),
+    match (
+        std::fs::read_to_string(privp),
+        std::fs::read_to_string(pubp),
+    ) {
+        (Ok(privs), Ok(pubs)) => Json(
+            serde_json::json!({"faest_private_key": privs.trim(), "faest_public_key": pubs.trim()}),
+        )
+        .into_response(),
+        (Err(e), _) | (_, Err(e)) => {
+            internal_error(format!("读取 Admin FAEST 密钥失败: {}", e)).into_response()
+        }
     }
 }
 
@@ -196,19 +250,41 @@ pub async fn post_faest_admin_keys() -> impl IntoResponse {
     let pubp = std::path::Path::new("data/admin_faest_pub.b64");
     let privp = std::path::Path::new("data/admin_faest_priv.b64");
     if pubp.exists() || privp.exists() {
-        return (StatusCode::CONFLICT, Json(ErrorResponse { error: "Admin FAEST keys already exist on server".to_string() })).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                code: "faest_keys_conflict".to_string(),
+                message: "Admin FAEST keys already exist on server".to_string(),
+                metadata: None,
+            }),
+        )
+            .into_response();
     }
-    match timeout(Duration::from_secs(30), tokio::task::spawn_blocking(|| crate::faest_ffi::keygen())).await {
+    match timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(|| crate::faest_ffi::keygen()),
+    )
+    .await
+    {
         Ok(Ok(Ok((pk, sk)))) => {
-            if let Err(e) = std::fs::create_dir_all("data") { return internal_error(format!("无法创建 data 目录: {}", e)).into_response(); }
+            if let Err(e) = std::fs::create_dir_all("data") {
+                return internal_error(format!("无法创建 data 目录: {}", e)).into_response();
+            }
             let sk_b64 = B64.encode(&sk);
             let pk_b64 = B64.encode(&pk);
-            if let Err(e) = std::fs::write(privp, &sk_b64) { return internal_error(format!("写入私钥失败: {}", e)).into_response(); }
-            if let Err(e) = std::fs::write(pubp, &pk_b64) { return internal_error(format!("写入公钥失败: {}", e)).into_response(); }
-            Json(serde_json::json!({"faest_private_key": sk_b64, "faest_public_key": pk_b64})).into_response()
+            if let Err(e) = std::fs::write(privp, &sk_b64) {
+                return internal_error(format!("写入私钥失败: {}", e)).into_response();
+            }
+            if let Err(e) = std::fs::write(pubp, &pk_b64) {
+                return internal_error(format!("写入公钥失败: {}", e)).into_response();
+            }
+            Json(serde_json::json!({"faest_private_key": sk_b64, "faest_public_key": pk_b64}))
+                .into_response()
         }
         Ok(Ok(Err(e))) => internal_error(format!("FAEST keygen failed: {}", e)).into_response(),
-        Ok(Err(join_err)) => internal_error(format!("FAEST keygen join error: {}", join_err)).into_response(),
+        Ok(Err(join_err)) => {
+            internal_error(format!("FAEST keygen join error: {}", join_err)).into_response()
+        }
         Err(_) => internal_error("FAEST keygen timed out").into_response(),
     }
 }
@@ -220,9 +296,10 @@ pub async fn get_admin_rsa(State(state): State<std::sync::Arc<AppState>>) -> imp
     let d_masked = if d_str.len() <= 24 {
         d_str.clone()
     } else {
-        format!("{}...{}", &d_str[..6], &d_str[d_str.len()-6..])
+        format!("{}...{}", &d_str[..6], &d_str[d_str.len() - 6..])
     };
-    Json(serde_json::json!({"ok": true, "n": n_str, "e": e_str, "d_masked": d_masked})).into_response()
+    Json(serde_json::json!({"ok": true, "n": n_str, "e": e_str, "d_masked": d_masked}))
+        .into_response()
 }
 
 pub async fn debug_last_errors() -> impl IntoResponse {
@@ -235,7 +312,15 @@ pub async fn get_chain_and_mine(
     Json(req): Json<EncryptAndMineRequest>,
 ) -> impl IntoResponse {
     let op_id = new_uuid();
-    progress::create_progress(op_id.clone(), &["envelope_encrypt", "faest_sign", "ch_compute", "persist_chain"]);
+    progress::create_progress(
+        op_id.clone(),
+        &[
+            "envelope_encrypt",
+            "faest_sign",
+            "ch_compute",
+            "persist_chain",
+        ],
+    );
 
     let op_id_for_task = op_id.clone();
     let state_cloned = state.clone();
@@ -249,7 +334,12 @@ pub async fn get_chain_and_mine(
         let sender_priv = match B64.decode(&req_cloned.sender_private_key) {
             Ok(b) => b,
             Err(e) => {
-                progress::update_progress_step(&op_id, "envelope_encrypt", "failed", Some(format!("私钥 Base64 解码失败: {}", e)));
+                progress::update_progress_step(
+                    &op_id,
+                    "envelope_encrypt",
+                    "failed",
+                    Some(format!("私钥 Base64 解码失败: {}", e)),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -257,7 +347,12 @@ pub async fn get_chain_and_mine(
         let sender_pub = match B64.decode(&req_cloned.sender_public_key) {
             Ok(b) => b,
             Err(e) => {
-                progress::update_progress_step(&op_id, "envelope_encrypt", "failed", Some(format!("公钥 Base64 解码失败: {}", e)));
+                progress::update_progress_step(
+                    &op_id,
+                    "envelope_encrypt",
+                    "failed",
+                    Some(format!("公钥 Base64 解码失败: {}", e)),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -267,7 +362,12 @@ pub async fn get_chain_and_mine(
             match B64.decode(&req_cloned.plaintext) {
                 Ok(b) => b,
                 Err(e) => {
-                    progress::update_progress_step(&op_id, "envelope_encrypt", "failed", Some(format!("plaintext Base64 解码失败: {}", e)));
+                    progress::update_progress_step(
+                        &op_id,
+                        "envelope_encrypt",
+                        "failed",
+                        Some(format!("plaintext Base64 解码失败: {}", e)),
+                    );
                     progress::set_progress_done(&op_id, false, None);
                     return;
                 }
@@ -276,7 +376,8 @@ pub async fn get_chain_and_mine(
             req_cloned.plaintext.as_bytes().to_vec()
         };
 
-        let envelope_result = match envelope_encrypt(&plaintext_bytes, &state_cloned.admin_rsa_pub) {
+        let envelope_result = match envelope_encrypt(&plaintext_bytes, &state_cloned.admin_rsa_pub)
+        {
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("envelope encrypt failed: {}", e);
@@ -287,7 +388,10 @@ pub async fn get_chain_and_mine(
                 return;
             }
         };
-        trace(&format!("encrypt_and_mine op={} envelope_encrypt done", op_id));
+        trace(&format!(
+            "encrypt_and_mine op={} envelope_encrypt done",
+            op_id
+        ));
         progress::update_progress_step(&op_id, "envelope_encrypt", "done", None);
 
         // 继续 faest_sign
@@ -302,7 +406,12 @@ pub async fn get_chain_and_mine(
         let payload_bytes = match serde_json::to_vec(&payload) {
             Ok(b) => b,
             Err(e) => {
-                progress::update_progress_step(&op_id, "faest_sign", "failed", Some(format!("serialize payload failed: {}", e)));
+                progress::update_progress_step(
+                    &op_id,
+                    "faest_sign",
+                    "failed",
+                    Some(format!("serialize payload failed: {}", e)),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -368,7 +477,8 @@ pub async fn get_chain_and_mine(
         let save_path = state_cloned.chain_file.clone();
 
         let persist = tokio::spawn(async move {
-            tokio::fs::create_dir_all(save_path.parent().unwrap_or(std::path::Path::new("."))).await?;
+            tokio::fs::create_dir_all(save_path.parent().unwrap_or(std::path::Path::new(".")))
+                .await?;
             let text = serde_json::to_string_pretty(&chain_clone)?;
             tokio::fs::write(save_path, text).await?;
             Ok::<(), anyhow::Error>(())
@@ -378,17 +488,31 @@ pub async fn get_chain_and_mine(
         match persist {
             Ok(Ok(())) => {
                 progress::update_progress_step(&op_id, "persist_chain", "done", None);
-                progress::set_progress_done(&op_id, true, Some(serde_json::json!({
-                    "message": "交易已成功打包上链",
-                    "block": chain.blocks.last()
-                })));
+                progress::set_progress_done(
+                    &op_id,
+                    true,
+                    Some(serde_json::json!({
+                        "message": "交易已成功打包上链",
+                        "block": chain.blocks.last()
+                    })),
+                );
             }
             Ok(Err(e)) => {
-                progress::update_progress_step(&op_id, "persist_chain", "failed", Some(format!("persist error: {}", e)));
+                progress::update_progress_step(
+                    &op_id,
+                    "persist_chain",
+                    "failed",
+                    Some(format!("persist error: {}", e)),
+                );
                 progress::set_progress_done(&op_id, false, None);
             }
             Err(join_err) => {
-                progress::update_progress_step(&op_id, "persist_chain", "failed", Some(format!("persist task join error: {}", join_err)));
+                progress::update_progress_step(
+                    &op_id,
+                    "persist_chain",
+                    "failed",
+                    Some(format!("persist task join error: {}", join_err)),
+                );
                 progress::set_progress_done(&op_id, false, None);
             }
         }
@@ -402,7 +526,15 @@ pub async fn redact_block(
     Json(req): Json<RedactRequest>,
 ) -> impl IntoResponse {
     let op_id = new_uuid();
-    progress::create_progress(op_id.clone(), &["prepare", "verify_signature", "apply_redact", "persist_chain"]);
+    progress::create_progress(
+        op_id.clone(),
+        &[
+            "prepare",
+            "verify_signature",
+            "apply_redact",
+            "persist_chain",
+        ],
+    );
 
     let op_id_for_task = op_id.clone();
     let state_cloned = state.clone();
@@ -413,11 +545,23 @@ pub async fn redact_block(
         trace(&format!("redact op={} start", op_id));
         progress::update_progress_step(&op_id, "prepare", "in_progress", None);
 
-        let label = req_cloned.redaction_label.unwrap_or_else(|| "【已合规抹除】".to_string());
-        let new_content = match state_cloned.chain.read().await.redaction_content_bytes(req_cloned.block_index, &label) {
+        let label = req_cloned
+            .redaction_label
+            .unwrap_or_else(|| "【已合规抹除】".to_string());
+        let new_content = match state_cloned
+            .chain
+            .read()
+            .await
+            .redaction_content_bytes(req_cloned.block_index, &label)
+        {
             Ok(c) => c,
             Err(e) => {
-                progress::update_progress_step(&op_id, "prepare", "failed", Some(format!("redaction content error: {}", e)));
+                progress::update_progress_step(
+                    &op_id,
+                    "prepare",
+                    "failed",
+                    Some(format!("redaction content error: {}", e)),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -429,13 +573,23 @@ pub async fn redact_block(
             Some(p) => match B64.decode(&p) {
                 Ok(b) => b,
                 Err(e) => {
-                    progress::update_progress_step(&op_id, "verify_signature", "failed", Some(format!("admin_public_key Base64 解码失败: {}", e)));
+                    progress::update_progress_step(
+                        &op_id,
+                        "verify_signature",
+                        "failed",
+                        Some(format!("admin_public_key Base64 解码失败: {}", e)),
+                    );
                     progress::set_progress_done(&op_id, false, None);
                     return;
                 }
             },
             None => {
-                progress::update_progress_step(&op_id, "verify_signature", "failed", Some("缺少 admin_public_key".to_string()));
+                progress::update_progress_step(
+                    &op_id,
+                    "verify_signature",
+                    "failed",
+                    Some("缺少 admin_public_key".to_string()),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -444,13 +598,23 @@ pub async fn redact_block(
             Some(s) => match B64.decode(&s) {
                 Ok(b) => b,
                 Err(e) => {
-                    progress::update_progress_step(&op_id, "verify_signature", "failed", Some(format!("admin_signature Base64 解码失败: {}", e)));
+                    progress::update_progress_step(
+                        &op_id,
+                        "verify_signature",
+                        "failed",
+                        Some(format!("admin_signature Base64 解码失败: {}", e)),
+                    );
                     progress::set_progress_done(&op_id, false, None);
                     return;
                 }
             },
             None => {
-                progress::update_progress_step(&op_id, "verify_signature", "failed", Some("缺少 admin_signature".to_string()));
+                progress::update_progress_step(
+                    &op_id,
+                    "verify_signature",
+                    "failed",
+                    Some("缺少 admin_signature".to_string()),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -463,19 +627,36 @@ pub async fn redact_block(
         .await;
 
         match verify_res {
-            Ok(Ok(true)) => progress::update_progress_step(&op_id, "verify_signature", "done", None),
+            Ok(Ok(true)) => {
+                progress::update_progress_step(&op_id, "verify_signature", "done", None)
+            }
             Ok(Ok(false)) => {
-                progress::update_progress_step(&op_id, "verify_signature", "failed", Some("管理员签名验证失败".to_string()));
+                progress::update_progress_step(
+                    &op_id,
+                    "verify_signature",
+                    "failed",
+                    Some("管理员签名验证失败".to_string()),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
             Ok(Err(e)) => {
-                progress::update_progress_step(&op_id, "verify_signature", "failed", Some(format!("验证错误: {}", e)));
+                progress::update_progress_step(
+                    &op_id,
+                    "verify_signature",
+                    "failed",
+                    Some(format!("验证错误: {}", e)),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
             Err(join_err) => {
-                progress::update_progress_step(&op_id, "verify_signature", "failed", Some(format!("签名验证 join 错误: {}", join_err)));
+                progress::update_progress_step(
+                    &op_id,
+                    "verify_signature",
+                    "failed",
+                    Some(format!("签名验证 join 错误: {}", join_err)),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -485,7 +666,12 @@ pub async fn redact_block(
         {
             let mut chain = state_cloned.chain.write().await;
             if let Err(e) = chain.redact_block(req_cloned.block_index, &state_cloned.ch, &label) {
-                progress::update_progress_step(&op_id, "apply_redact", "failed", Some(format!("redact_block failed: {}", e)));
+                progress::update_progress_step(
+                    &op_id,
+                    "apply_redact",
+                    "failed",
+                    Some(format!("redact_block failed: {}", e)),
+                );
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -496,7 +682,13 @@ pub async fn redact_block(
         let state_clone_2 = state_cloned.clone();
         let persist_result = tokio::spawn(async move {
             let chain = state_clone_2.chain.read().await;
-            tokio::fs::create_dir_all(state_clone_2.chain_file.parent().unwrap_or(std::path::Path::new("."))).await?;
+            tokio::fs::create_dir_all(
+                state_clone_2
+                    .chain_file
+                    .parent()
+                    .unwrap_or(std::path::Path::new(".")),
+            )
+            .await?;
             let text = serde_json::to_string_pretty(&*chain)?;
             tokio::fs::write(&state_clone_2.chain_file, text).await?;
             Ok::<(), anyhow::Error>(())
@@ -508,17 +700,31 @@ pub async fn redact_block(
                 progress::update_progress_step(&op_id, "persist_chain", "done", None);
                 let chain_reader = state_cloned.chain.read().await;
                 let block = chain_reader.blocks.get(req_cloned.block_index).cloned();
-                progress::set_progress_done(&op_id, true, Some(serde_json::json!({
-                    "message": format!("区块 {} 已合规修订", req_cloned.block_index),
-                    "block": block,
-                })));
+                progress::set_progress_done(
+                    &op_id,
+                    true,
+                    Some(serde_json::json!({
+                        "message": format!("区块 {} 已合规修订", req_cloned.block_index),
+                        "block": block,
+                    })),
+                );
             }
             Ok(Err(e)) => {
-                progress::update_progress_step(&op_id, "persist_chain", "failed", Some(format!("persist error: {}", e)));
+                progress::update_progress_step(
+                    &op_id,
+                    "persist_chain",
+                    "failed",
+                    Some(format!("persist error: {}", e)),
+                );
                 progress::set_progress_done(&op_id, false, None);
             }
             Err(join_err) => {
-                progress::update_progress_step(&op_id, "persist_chain", "failed", Some(format!("persist task join error: {}", join_err)));
+                progress::update_progress_step(
+                    &op_id,
+                    "persist_chain",
+                    "failed",
+                    Some(format!("persist task join error: {}", join_err)),
+                );
                 progress::set_progress_done(&op_id, false, None);
             }
         }
@@ -543,10 +749,14 @@ pub async fn redact_prepare(
     State(state): State<std::sync::Arc<AppState>>,
     Json(req): Json<RedactPrepareRequest>,
 ) -> impl IntoResponse {
-    let label = req.redaction_label.unwrap_or_else(|| "【已合规抹除】".to_string());
+    let label = req
+        .redaction_label
+        .unwrap_or_else(|| "【已合规抹除】".to_string());
     let chain = state.chain.read().await;
     match chain.redaction_content_bytes(req.block_index, &label) {
-        Ok(content) => Json(serde_json::json!({ "message_base64": B64.encode(&content) })).into_response(),
+        Ok(content) => {
+            Json(serde_json::json!({ "message_base64": B64.encode(&content) })).into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -554,7 +764,9 @@ pub async fn redact_prepare(
 pub async fn admin_sign(Json(req): Json<AdminSignRequest>) -> impl IntoResponse {
     let priv_bytes = match B64.decode(&req.private_key_base64) {
         Ok(b) => b,
-        Err(e) => return internal_error(format!("private_key Base64 解码失败: {}", e)).into_response(),
+        Err(e) => {
+            return internal_error(format!("private_key Base64 解码失败: {}", e)).into_response()
+        }
     };
     let msg = match B64.decode(&req.message_base64) {
         Ok(b) => b,
@@ -562,7 +774,105 @@ pub async fn admin_sign(Json(req): Json<AdminSignRequest>) -> impl IntoResponse 
     };
 
     match FaestImpl.sign(&msg, &priv_bytes) {
-        Ok(sig) => Json(serde_json::json!({ "signature_base64": B64.encode(&sig) })).into_response(),
+        Ok(sig) => {
+            Json(serde_json::json!({ "signature_base64": B64.encode(&sig) })).into_response()
+        }
         Err(e) => internal_error(format!("签名失败: {}", e)).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use serde_json::Value;
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio::time::sleep;
+
+    use crate::chain::Blockchain;
+    use crate::crypto::{generate_faest_keypair, generate_rsa_keypair, ChameleonHash};
+
+    #[tokio::test]
+    async fn e2e_encrypt_mine_progress_chain_and_plain() {
+        let dir = tempdir().expect("tempdir");
+        let chain_path: PathBuf = dir.path().join("chain.json");
+
+        let (admin_priv, admin_pub) = generate_rsa_keypair().expect("RSA keypair gen");
+        let ch = ChameleonHash::setup(&admin_priv);
+
+        let mut chain = Blockchain::new();
+        let (genesis_priv, genesis_pub) = generate_faest_keypair();
+        chain
+            .genesis_block(&ch, &admin_pub, &genesis_priv, &genesis_pub)
+            .expect("genesis block");
+
+        let state = std::sync::Arc::new(AppState {
+            ch,
+            chain: tokio::sync::RwLock::new(chain),
+            admin_rsa_pub: admin_pub.clone(),
+            admin_rsa_priv: admin_priv,
+            chain_file: chain_path.clone(),
+        });
+
+        let (sender_priv, sender_pub) = generate_faest_keypair();
+        let sender_priv_b64 = BASE64.encode(&sender_priv);
+        let sender_pub_b64 = BASE64.encode(&sender_pub);
+
+        let req = EncryptAndMineRequest {
+            plaintext: "hello e2e test".into(),
+            plaintext_base64: None,
+            sender_private_key: sender_priv_b64,
+            sender_public_key: sender_pub_b64,
+            filename: None,
+            mime_type: None,
+        };
+
+        let resp = get_chain_and_mine(State(state.clone()), Json(req))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body_bytes = to_bytes(resp.into_body(), 10_000_000).await.expect("body");
+        let json: Value = serde_json::from_slice(&body_bytes).expect("parse json");
+        let op_id = json["op_id"].as_str().expect("op_id").to_string();
+
+        let mut completed = false;
+        for _ in 0..20 {
+            let progress_resp = get_progress(Path(op_id.clone())).await.into_response();
+            assert_eq!(progress_resp.status(), StatusCode::OK);
+            let body_bytes = to_bytes(progress_resp.into_body(), 10_000_000)
+                .await
+                .expect("body");
+            let json: Value = serde_json::from_slice(&body_bytes).expect("parse json");
+            if json["progress"]["done"].as_bool().unwrap_or(false) {
+                completed = true;
+                break;
+            }
+            sleep(Duration::from_millis(250)).await;
+        }
+
+        assert!(completed, "operation did not complete in time");
+
+        let chain_resp = get_chain(State(state.clone())).await.into_response();
+        assert_eq!(chain_resp.status(), StatusCode::OK);
+        let body_bytes = to_bytes(chain_resp.into_body(), 10_000_000)
+            .await
+            .expect("body");
+        let json: Value = serde_json::from_slice(&body_bytes).expect("parse json");
+        assert!(json["blocks"].is_array());
+
+        let plain_resp = get_block_plain(State(state), Path(1usize))
+            .await
+            .into_response();
+        assert_eq!(plain_resp.status(), StatusCode::OK);
+        let body_bytes = to_bytes(plain_resp.into_body(), 10_000_000)
+            .await
+            .expect("body");
+        let json: Value = serde_json::from_slice(&body_bytes).expect("parse json");
+        assert_eq!(json["plaintext_utf8"], "hello e2e test");
     }
 }

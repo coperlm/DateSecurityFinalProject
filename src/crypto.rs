@@ -16,6 +16,7 @@ use num_integer::Integer;
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
 use rsa::{pkcs1v15::Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use rsa::traits::PublicKeyParts;
 use std::time::Instant;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -112,6 +113,13 @@ pub fn envelope_decrypt(
     rsa_priv_key: &RsaPrivateKey,
 ) -> Result<Vec<u8>> {
     // 解密 AES 密钥
+    // 先做一些诊断日志以便排查常见的解密失败原因（例如 encrypted_key 长度与 RSA 模数长度不匹配）
+    let enc_len = envelope.encrypted_key.len();
+    let modulus_len = rsa_priv_key.n().to_bytes_be().len();
+    if enc_len != modulus_len {
+        return Err(anyhow!("RSA 解密 AES 密钥失败: encrypted_key 长度与 RSA 模数长度不匹配"));
+    }
+
     let aes_key_bytes = rsa_priv_key
         .decrypt(Pkcs1v15Encrypt, &envelope.encrypted_key)
         .map_err(|e| anyhow!("RSA 解密 AES 密钥失败: {}", e))?;

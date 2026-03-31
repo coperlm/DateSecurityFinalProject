@@ -62,5 +62,20 @@ fi
 export FAEST_BUILD_WRAPPER=${BUILD_WRAPPER}
 export LD_LIBRARY_PATH="${ROOT_DIR}/libs/FAEST/builddir:${LD_LIBRARY_PATH:-}"
 
-echo "==> 运行: LD_LIBRARY_PATH=libs/FAEST/builddir: FAEST_BUILD_WRAPPER=${FAEST_BUILD_WRAPPER} cargo run"
+if command -v lsof >/dev/null 2>&1; then
+  PIDS=$(lsof -ti tcp:8080 || true)
+  if [ -n "${PIDS}" ]; then
+    echo "发现占用 8080 的进程: ${PIDS}，发送 TERM 信号..."
+    kill -TERM ${PIDS} || true
+    sleep 1
+    # 若仍然存在，强制杀死
+    PIDS2=$(lsof -ti tcp:8080 || true)
+    if [ -n "${PIDS2}" ]; then
+      echo "进程仍然存在，发送 KILL 信号: ${PIDS2}"
+      kill -KILL ${PIDS2} || true
+      sleep 1
+    fi
+  fi
+fi
+
 FAEST_BUILD_WRAPPER=${FAEST_BUILD_WRAPPER} LD_LIBRARY_PATH="${ROOT_DIR}/libs/FAEST/builddir:${LD_LIBRARY_PATH:-}" cargo run

@@ -290,6 +290,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "once_cell",
  "rand",
  "rsa",
  "serde",

@@ -26,6 +26,8 @@
     /* 高亮闪烁（用于 hash 不变提示） */
     @keyframes flash-green { 0%,100%{background:transparent} 30%{background:rgba(34,197,94,.25)} }
     .flash-green { animation: flash-green 1.2s ease 3; }
+    /* 不换行并在末尾显示省略号（用于超长数字展示） */
+    .no-wrap-ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen p-4 md:p-8">
@@ -196,6 +198,18 @@
             class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-yellow-300 mt-1 outline-none focus:border-amber-600 transition" />
         </div>
       </div>
+      <div class="mt-3 grid grid-cols-1 gap-2">
+        <div>
+          <label class="text-xs text-gray-500">Admin RSA 私钥（数字形式，演示：d=...）</label>
+          <textarea id="inp-admin-rsa-priv" rows="1" readonly
+            class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-amber-200 mt-1 outline-none no-wrap-ellipsis" ></textarea>
+        </div>
+        <div>
+          <label class="text-xs text-gray-500">Admin RSA 公钥（数字形式，演示：n=...，e=...）</label>
+          <textarea id="inp-admin-rsa-pub" rows="1" readonly
+            class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-amber-200 mt-1 outline-none no-wrap-ellipsis"></textarea>
+        </div>
+      </div>
       <p class="text-xs text-gray-500 mt-2">说明：演示使用两类 Admin 密钥：<strong>服务器端的 RSA 私钥</strong>（用于变色龙哈希陷门，保存在服务端文件 <code>data/admin_rsa.pem</code>，不在前端传输）和 <strong>Admin FAEST 密钥对</strong>（用于对修订操作生成 FAEST 签名，演示允许前端提交以便模拟流程）。生产环境请勿在客户端传输私钥。</p>
     </div>
 
@@ -205,7 +219,7 @@
     </button>
 
     <!-- 修订结果对比面板 -->
-    <div id="redact-result" class="hidden mt-5 anim-slide-in">
+    <div id="redact-result" class="hidden mt-5 anim-slide-in">n=
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <!-- 修订前 -->
         <div class="p-4 bg-gray-800/60 rounded-xl border border-gray-700/50">
@@ -261,7 +275,7 @@ function showToast(msg, ok=true) {
 }
 
 // ── 生成密钥对 ────────────────────────────────────────────
-// 生成 FAEST 密钥对并自动填充用户与 Admin 字段（演示）
+// 生成 FAEST 密钥对并自动填充用户字段（演示）
 async function genFaestKeys() {
   try {
     const res = await fetch('/faest_keys');
@@ -270,23 +284,65 @@ async function genFaestKeys() {
     // 填充发送方密钥
     if ($('inp-privkey')) $('inp-privkey').value = data.faest_private_key || '';
     if ($('inp-pubkey'))  $('inp-pubkey').value  = data.faest_public_key || '';
-      showToast('✅ FAEST 用户密钥已生成并填充');
-  // 生成一次性 Admin FAEST 密钥（演示）
-  async function genAdminFaestKeys(){
-    try{
-      const res = await fetch('/faest_admin_keys');
-      if(!res.ok) throw new Error('HTTP '+res.status);
-      const data = await res.json();
-      if ($('inp-admin-priv')) $('inp-admin-priv').value = data.faest_private_key || '';
-      if ($('inp-admin-pub'))  $('inp-admin-pub').value  = data.faest_public_key || '';
-      showToast('✅ Admin FAEST（一次性）已生成并填充（仅演示）');
-    }catch(e){ console.error('genAdminFaestKeys error', e); showToast('❌ Admin 密钥生成失败', false); }
-  }
-  if ($('btn-gen-admin-faest')) { $('btn-gen-admin-faest').addEventListener('click', genAdminFaestKeys); }
+    showToast('✅ FAEST 用户密钥已生成并填充');
   } catch(e) {
     console.error('genFaestKeys error', e);
     showToast('❌ FAEST 密钥生成失败: ' + (e.message || e), false);
   }
+}
+
+// 生成一次性 Admin FAEST（如果服务器上已有则拒绝）
+async function genAdminFaestKeys(){
+  try{
+    const res = await fetch('/faest_admin_keys', { method: 'POST' });
+    if (res.status === 409) {
+      const j = await res.json().catch(()=>({error:'已存在'}));
+      showToast('⚠️ 已存在 Admin FAEST：' + (j.error||'请在服务器上删除后重试'), false);
+      return;
+    }
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const data = await res.json();
+    showAdminFaestKeys(data.faest_private_key, data.faest_public_key);
+    // 拉取并显示服务器端 RSA（数字形式）
+    try{
+      const rsa = await (await fetch('/admin_rsa')).json();
+      if (rsa.d_masked) {
+      const el = $('inp-admin-rsa-priv');
+      if (el) { el.value = 'd=' + rsa.d_masked; el.dataset.full = rsa.d_masked; el.title = rsa.d_masked; }
+      }
+      if (rsa.n && rsa.e) {
+        const pub = 'n=' + rsa.n + '\n' + 'e=' + rsa.e;
+        const elp = $('inp-admin-rsa-pub');
+        if (elp) { elp.value = pub; elp.dataset.full = `n=${rsa.n}\ne=${rsa.e}`; elp.title = '点击可复制完整公钥（包含换行）'; }
+      }
+    } catch(_){ }
+    showToast('✅ Admin FAEST 已在服务器生成并持久化，前端已锁定');
+  }catch(e){ console.error('genAdminFaestKeys error', e); showToast('❌ Admin 密钥生成失败', false); }
+}
+if ($('btn-gen-admin-faest')) { $('btn-gen-admin-faest').addEventListener('click', genAdminFaestKeys); }
+
+function showAdminFaestKeys(priv, pub){
+  if ($('inp-admin-priv')) { $('inp-admin-priv').value = priv || ''; $('inp-admin-priv').disabled = true; }
+  if ($('inp-admin-pub'))  { $('inp-admin-pub').value  = pub  || ''; $('inp-admin-pub').disabled  = true; }
+}
+
+// 检查服务器上是否已有 Admin FAEST（若有则自动填充并锁定，同时显示 RSA 的数字形式）
+async function checkAdminFaestExists(){
+  try{
+    const res = await fetch('/faest_admin_exists');
+    if (!res.ok) return;
+    const j = await res.json();
+    if (j.exists) {
+      // 读取密钥并显示
+      try{ const keys = await (await fetch('/faest_admin_keys')).json(); showAdminFaestKeys(keys.faest_private_key, keys.faest_public_key); } catch(e){}
+      try{ const rsa = await (await fetch('/admin_rsa')).json();
+        if (rsa.d_masked) { const el = $('inp-admin-rsa-priv'); if (el) { el.value = 'd=' + rsa.d_masked; el.dataset.full = rsa.d_masked; el.title = rsa.d_masked; } }
+        if (rsa.n && rsa.e) { const elp = $('inp-admin-rsa-pub'); const pub = 'n=' + rsa.n + '\n' + 'e=' + rsa.e; if (elp) { elp.value = pub; elp.dataset.full = `n=${rsa.n}\ne=${rsa.e}`; elp.title = '点击可复制完整公钥（包含换行）'; } }
+      } catch(e){}
+    } else {
+      // 若不存在，则保持可生成状态（按钮可用）
+    }
+  } catch(e) { console.error('checkAdminFaestExists', e); }
 }
 
 // 绑定生成按钮（在脚本加载完成后设置，避免 inline handler 问题）
@@ -320,25 +376,19 @@ $('btn-encrypt-mine').addEventListener('click', async () => {
   if (!hasFile && !plaintext) { showToast('❌ 请输入明文内容或选择文件上传', false); return; }
   if (!privKey || !pubKey) { showToast('❌ 请先生成或填写密钥对', false); return; }
 
-  // 展示进度面板
+  // 展示统一的处理提示
   $('progress-panel').classList.remove('hidden');
   $('mine-result').classList.add('hidden');
-  ['step-aes','step-rsa','step-sig','step-cmac','step-ch','step-chain'].forEach(s => setStep(s,'wait'));
-
-  // 模拟分步进度（实际加密在后端完成）
-  await sleep(200);  setStep('step-aes', 'active');
-  await sleep(400);  setStep('step-aes', 'done'); setStep('step-rsa', 'active');
-  await sleep(400);  setStep('step-rsa', 'done'); setStep('step-sig', 'active');
-  await sleep(300);  setStep('step-sig', 'done'); setStep('step-cmac', 'active');
-  await sleep(300);  setStep('step-cmac','done'); setStep('step-ch',   'active');
-  // 等待后端完成变色龙哈希计算（step-ch 保持 active 状态，直到服务器响应）
+  ['step-aes','step-rsa','step-sig','step-cmac','step-ch','step-chain'].forEach(s => setStep(s, 'wait'));
+  const btn = $('btn-encrypt-mine');
+  const oldBtnText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ 处理中…';
 
   try {
-    // 如果有文件被选择，优先上传文件（二进制 -> base64）
     let body;
     if (hasFile) {
       const f = fileInput.files[0];
-      // Use FileReader.readAsDataURL to get a safe base64 encoding for arbitrary binary files
       const readDataUrl = () => new Promise((resolve, reject) => {
         const fr = new FileReader();
         fr.onload = () => resolve(fr.result);
@@ -346,7 +396,6 @@ $('btn-encrypt-mine').addEventListener('click', async () => {
         fr.readAsDataURL(f);
       });
       const dataUrl = await readDataUrl();
-      // data:[<mediatype>][;base64],<data>
       const parts = dataUrl.split(',');
       const b64 = parts[1] || '';
       body = JSON.stringify({ plaintext_base64: true, plaintext: b64, filename: f.name, mime_type: f.type || null, sender_private_key: privKey, sender_public_key: pubKey });
@@ -359,12 +408,21 @@ $('btn-encrypt-mine').addEventListener('click', async () => {
       headers: {'Content-Type':'application/json'},
       body
     });
+    if (!res.ok) {
+      let errMsg = '';
+      try { const j = await res.json(); errMsg = j.error || j.message || JSON.stringify(j); } catch(_) { errMsg = await res.text().catch(()=>String(res.status)); }
+      showToast('❌ 后端处理失败: ' + (errMsg || res.status), false);
+      btn.disabled = false; btn.textContent = oldBtnText;
+      return;
+    }
+
     const data = await res.json();
+    btn.disabled = false; btn.textContent = oldBtnText;
 
-    setStep('step-ch', 'done'); setStep('step-chain', 'active');
-    await sleep(300); setStep('step-chain', 'done');
-
-    if (data.success) {
+    if (data && data.ok && data.op_id) {
+      showToast('⏳ 后端已接收请求，上链中...');
+      pollProgress(data.op_id);
+    } else if (data && data.success) {
       const b = data.block;
       $('mine-result').classList.remove('hidden');
       $('mine-result').innerHTML = `
@@ -377,17 +435,16 @@ $('btn-encrypt-mine').addEventListener('click', async () => {
       showToast('✅ 已成功打包上链！');
       loadChain();
     } else {
-      showToast('❌ ' + (data.error || '上链失败'), false);
+      showToast('❌ 上链失败: ' + (data?.error || '未知错误'), false);
     }
   } catch(e) {
-    setStep('step-ch','wait'); setStep('step-chain','wait');
     showToast('❌ 请求失败: ' + e.message, false);
+    btn.disabled = false; btn.textContent = oldBtnText;
   }
 });
 
 // 简单的服务连通性检测（请求 /health，带超时）
-async function isServerAlive(timeoutMs = 1500) {
-  const controller = new AbortController();
+async function isServerAlive(timeoutMs = 1500) {  const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch('/health', { signal: controller.signal, cache: 'no-store' });
@@ -408,7 +465,7 @@ async function loadChain() {
     const blocks = data.blocks || [];
 
     $('stat-blocks').textContent = blocks.length;
-    $('stat-txs').textContent    = blocks.length > 0 ? blocks.length - 1 : 0; // 排除创世块
+        $('stat-txs').textContent    = blocks.length > 0 ? blocks.length - 1 : 0; // 排除创世块
     $('stat-valid').textContent  = data.is_valid ? '✓ 合法' : '✗ 异常';
 
     const list = $('chain-list');
@@ -456,6 +513,121 @@ async function loadChain() {
   }
 }
 
+// Poll redact operation progress and update redact UI once done
+async function pollRedact(opid, blockIndex, oldPayload, oldR) {
+  try {
+    let finished = false;
+    while (!finished) {
+      const res = await fetch('/progress/' + encodeURIComponent(opid), { cache: 'no-store' });
+      if (!res.ok) {
+        if (res.status === 404) { showToast('❌ 操作未找到', false); return; }
+        await new Promise(r => setTimeout(r, 800));
+        continue;
+      }
+      const j = await res.json();
+      const p = j.progress || j;
+      if (p && p.steps) {
+        for (const s of p.steps) {
+          // reuse mapping from pollProgress
+          // map verify_signature -> step-sig, apply_redact/persist_chain -> step-chain
+          if (s.name === 'verify_signature') {
+            if (s.status === 'in_progress') setStep('step-sig','active');
+            else if (s.status === 'done') setStep('step-sig','done');
+          }
+          if (s.name === 'apply_redact' || s.name === 'persist_chain') {
+            if (s.status === 'in_progress') setStep('step-chain','active');
+            else if (s.status === 'done') setStep('step-chain','done');
+          }
+        }
+      }
+      if (p && p.done) {
+        finished = true;
+        if (p.success) {
+          // populate redact-result if block present
+          if (p.result && p.result.block) {
+            const b = p.result.block;
+            $('redact-result').classList.remove('hidden');
+            $('redact-old-payload').textContent = truncate(oldPayload, 60);
+            $('redact-old-r').textContent       = truncate(oldR, 60);
+            $('redact-new-payload').textContent = truncate(b.tx.payload.ciphertext, 60);
+            $('redact-new-r').textContent       = truncate(b.randomness, 60);
+            $('redact-hash-value').textContent  = b.hash;
+            const proof = $('redact-hash-proof'); proof.classList.remove('flash-green'); void proof.offsetWidth; proof.classList.add('flash-green');
+          }
+          showToast('✅ 合规修订完成，区块哈希保持不变！');
+          loadChain();
+        } else {
+          showToast('❌ 合规修订失败', false);
+        }
+        break;
+      }
+      await new Promise(r => setTimeout(r, 900));
+    }
+  } catch(e) {
+    console.error('pollRedact error', e);
+    showToast('❌ 读取修订进度失败: ' + e.message, false);
+  }
+}
+
+async function pollProgress(opid) {
+  try {
+    let finished = false;
+    while (!finished) {
+      const res = await fetch('/progress/' + encodeURIComponent(opid), { cache: 'no-store' });
+      if (!res.ok) {
+        if (res.status === 404) { showToast('❌ 操作未找到', false); return; }
+        await new Promise(r => setTimeout(r, 800));
+        continue;
+      }
+      const j = await res.json();
+      const p = j.progress || j;
+      if (p && p.steps) {
+        for (const s of p.steps) {
+          if (s.name === 'envelope_encrypt') {
+            if (s.status === 'in_progress') { setStep('step-aes', 'active'); setStep('step-rsa', 'wait'); }
+            else if (s.status === 'done') { setStep('step-aes', 'done'); setStep('step-rsa', 'done'); }
+            else if (s.status === 'failed') { setStep('step-aes', 'wait'); setStep('step-rsa', 'wait'); }
+          }
+          if (s.name === 'faest_sign') {
+            if (s.status === 'in_progress') setStep('step-sig', 'active');
+            else if (s.status === 'done') setStep('step-sig', 'done');
+            else if (s.status === 'failed') setStep('step-sig', 'wait');
+          }
+          if (s.name === 'ch_compute') {
+            if (s.status === 'in_progress') { setStep('step-cmac', 'active'); setStep('step-ch', 'active'); }
+            else if (s.status === 'done') { setStep('step-cmac', 'done'); setStep('step-ch', 'done'); }
+            else if (s.status === 'failed') { setStep('step-cmac', 'wait'); setStep('step-ch', 'wait'); }
+          }
+          if (s.name === 'persist_chain') {
+            if (s.status === 'in_progress') setStep('step-chain', 'active');
+            else if (s.status === 'done') setStep('step-chain', 'done');
+            else if (s.status === 'failed') setStep('step-chain', 'wait');
+          }
+        }
+      }
+      if (p && p.done) {
+        finished = true;
+        if (p.success) {
+          showToast('✅ 上链已完成');
+          if (p.result && p.result.block) {
+            const b = p.result.block;
+            $('mine-result').classList.remove('hidden');
+            $('mine-result').innerHTML = `\n              <p class="text-green-400 font-semibold mb-2">✅ ${p.result.message || '已上链'}</p>\n              <p><span class="text-gray-400">区块 #</span>${b.index}</p>\n              <p><span class="text-gray-400">Hash  </span>${truncate(b.hash, 56)}</p>\n              <p><span class="text-gray-400">Tx ID </span>${b.tx.tx_id}</p>\n              <p><span class="text-gray-400">密文  </span>${truncate(b.tx.payload.ciphertext, 48)}</p>\n            `;
+          }
+          loadChain();
+        } else {
+          showToast('❌ 上链失败', false);
+        }
+        break;
+      }
+      await new Promise(r => setTimeout(r, 900));
+    }
+  } catch(e) {
+    console.error('pollProgress error', e);
+    showToast('❌ 读取上链进度失败: ' + e.message, false);
+  }
+}
+
 // 在区块下显示解密明文（调用后端）
 async function viewPlain(index) {
   const el = document.getElementById(`block-plain-${index}`);
@@ -463,6 +635,25 @@ async function viewPlain(index) {
   el.textContent = '正在解密...';
   try {
     const res = await fetch(`/block_plain/${index}`);
+    if (!res.ok) {
+      // 尝试读取服务器返回的错误信息（文本或 JSON）并显示
+      let errText = '';
+      try { errText = await res.text(); } catch(_) { errText = String(res.status); }
+      el.textContent = '解密失败';
+      // 从服务器拉取最近错误以便显示更具体的调试信息
+      try {
+        const dbg = await (await fetch('/debug/last_errors')).json();
+        const last = (dbg && dbg.last_errors && dbg.last_errors.length) ? dbg.last_errors[0] : null;
+        if (last) {
+          showToast('❌ 解密失败: ' + (last || errText), false);
+        } else {
+          showToast('❌ 解密失败: ' + (errText || res.status), false);
+        }
+      } catch(_) {
+        showToast('❌ 解密失败: ' + (errText || res.status), false);
+      }
+      return;
+    }
     const data = await res.json();
     if (data.success) {
       // 如果后端返回 filename，则视为二进制文件，触发下载
@@ -496,17 +687,14 @@ async function viewPlain(index) {
   }
 }
 
-$('btn-refresh').addEventListener('click', loadChain);
-
-// 手动检查链完整性（触发一次 /chain 请求并突出显示）
-const btnCheck = document.createElement('button');
-btnCheck.className = 'ml-2 text-xs bg-green-700 hover:bg-green-600 transition px-3 py-1.5 rounded';
-btnCheck.textContent = '检查链完整性';
-btnCheck.addEventListener('click', async () => {
-  await loadChain();
-  showToast('✅ 已完成链完整性检查');
-});
-document.querySelector('#btn-refresh').after(btnCheck);
+// 合并“刷新”与“检查链完整性”为同一按钮：加载链并提示完成
+if ($('btn-refresh')) {
+  $('btn-refresh').textContent = '🔄 刷新 / 检查完整性';
+  $('btn-refresh').addEventListener('click', async () => {
+    await loadChain();
+    showToast('✅ 已完成链完整性检查');
+  });
+}
 
 // 文件选择显示
 const _inpFile = $('inp-file');
@@ -536,15 +724,20 @@ $('btn-clear-file').addEventListener('click', (e) => {
 });
 
 $('btn-redact').addEventListener('click', async () => {
-  const blockIndex    = parseInt($('inp-redact-index').value);
-  const redactLabel   = $('inp-redact-label').value.trim() || '【已合规抹除】';
+  const blockIndex  = parseInt($('inp-redact-index').value);
+  const redactLabel = $('inp-redact-label').value.trim() || '【已合规抹除】';
+  const adminPriv   = $('inp-admin-priv').value.trim();
+  const adminPub    = $('inp-admin-pub').value.trim();
 
   if (isNaN(blockIndex) || blockIndex < 0) {
     showToast('❌ 请输入有效的区块索引', false);
     return;
   }
+  if (!adminPriv || !adminPub) {
+    showToast('❌ 请先提供 Admin FAEST 密钥(公/私)以便签名', false);
+    return;
+  }
 
-  // 记录修订前状态
   let oldPayload = '', oldR = '';
   try {
     const chainRes = await fetch('/chain');
@@ -552,67 +745,84 @@ $('btn-redact').addEventListener('click', async () => {
     const blocks = chainData.blocks || [];
     if (blockIndex < blocks.length) {
       oldPayload = blocks[blockIndex].tx.payload.ciphertext;
-      oldR       = blocks[blockIndex].randomness;
+      oldR = blocks[blockIndex].randomness;
     }
-  } catch(_) {}
+  } catch(_) {
+    // ignore chain read error
+  }
 
   try {
-    // Step 1: 向后端请求待签名的 canonical message
+    // 1) 准备待签名数据
     const prepRes = await fetch('/redact_prepare', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ block_index: blockIndex, redaction_label: redactLabel })
-    });
-    const prep = await prepRes.json();
-    const message_b64 = prep.message_base64;
-
-    // Step 2: 使用 Admin 私钥向后端请求签名（演示）
-    const adminPriv = $('inp-admin-priv').value.trim();
-    const adminPub  = $('inp-admin-pub').value.trim();
-    if (!adminPriv || !adminPub) { showToast('❌ 请填写 Admin 私钥与公钥以签名修订', false); return; }
-
-    const signRes = await fetch('/admin_sign', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ private_key_base64: adminPriv, message_base64: message_b64 })
-    });
-    const signJson = await signRes.json();
-    const admin_sig_b64 = signJson.signature_base64;
-
-    // Step 3: 提交 redact 请求并附带 admin 公钥与签名
-    const res = await fetch('/redact', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ block_index: blockIndex, redaction_label: redactLabel, admin_public_key: adminPub, admin_signature: admin_sig_b64 })
+      body: JSON.stringify({block_index:blockIndex, redaction_label:redactLabel})
     });
-    const data = await res.json();
+    if (!prepRes.ok) throw new Error('redact_prepare 请求失败: ' + prepRes.status);
+    const prepData = await prepRes.json();
+    if (!prepData.message_base64) throw new Error('redact_prepare 未返回 message_base64');
 
-    if (data.success) {
-      const b = data.block;
-      $('redact-result').classList.remove('hidden');
+    // 2) Admin 签名
+    const signRes = await fetch('/admin_sign', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({private_key_base64: adminPriv, message_base64: prepData.message_base64})
+    });
+    if (!signRes.ok) throw new Error('admin_sign 请求失败: ' + signRes.status);
+    const signData = await signRes.json();
+    if (!signData.signature_base64) throw new Error('admin_sign 未返回 signature_base64');
 
-      $('redact-old-payload').textContent = truncate(oldPayload, 60);
-      $('redact-old-r').textContent       = truncate(oldR, 60);
-      $('redact-new-payload').textContent = truncate(b.tx.payload.ciphertext, 60);
-      $('redact-new-r').textContent       = truncate(b.randomness, 60);
-      $('redact-hash-value').textContent  = b.hash;
-
-      // 移除并重新触发闪烁动画
-      const proof = $('redact-hash-proof');
-      proof.classList.remove('flash-green');
-      void proof.offsetWidth; // 触发重排
-      proof.classList.add('flash-green');
-
-      showToast('✅ 合规修订完成，区块哈希保持不变！');
-      loadChain();
-    } else {
-      showToast('❌ ' + (data.error || '修订失败'), false);
+    // 3) 提交 redact，并获取 op_id
+    const redactRes = await fetch('/redact', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        block_index: blockIndex,
+        redaction_label: redactLabel,
+        admin_public_key: adminPub,
+        admin_signature: signData.signature_base64,
+      }),
+    });
+    if (!redactRes.ok) {
+      const txt = await redactRes.text().catch(()=>String(redactRes.status));
+      throw new Error('redact 请求失败: ' + txt);
     }
+    const redactData = await redactRes.json();
+    if (!redactData.ok || !redactData.op_id) {
+      throw new Error('redact 未返回 op_id: ' + JSON.stringify(redactData));
+    }
+
+    // 开始轮询进度
+    $('redact-result').classList.add('hidden');
+    pollRedact(redactData.op_id, blockIndex, oldPayload, oldR);
+    showToast('⏳ 合规修订已提交，正在后台处理');
   } catch(e) {
-    showToast('❌ 请求失败: ' + e.message, false);
+    console.error('redact error', e);
+    showToast('❌ 合规修订失败: ' + e.message, false);
   }
 });
 
 // ── 初始加载 ──────────────────────────────────────────────
+// 先检查 Admin FAEST 是否存在并初始化前端显示，再加载链数据
+checkAdminFaestExists();
 loadChain();
+
+// 点击复制完整 RSA 字符串（若被省略）
+['inp-admin-rsa-priv','inp-admin-rsa-pub'].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  el.style.cursor = 'pointer';
+  el.addEventListener('click', async () => {
+    const full = el.dataset && el.dataset.full ? el.dataset.full : el.value;
+    try {
+      await navigator.clipboard.writeText(String(full));
+      showToast('✅ 已复制完整密钥到剪贴板');
+    } catch(e) {
+      // 退回到弹窗显示
+      alert('完整密钥:\n\n' + String(full));
+    }
+  });
+});
 </script>
 </body>
 </html>

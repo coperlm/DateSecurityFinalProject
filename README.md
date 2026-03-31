@@ -23,19 +23,14 @@ meson setup libs/FAEST/builddir && ninja -C libs/FAEST/builddir
 FAEST_BUILD_WRAPPER=1 cargo build
 
 # 运行（确保动态库可被加载）：
-LD_LIBRARY_PATH=libs/FAEST/builddir: FAEST_BUILD_WRAPPER=1 cargo run
+./run.sh
 
-有占了
-[coper@coperpc DateSecurityFinalProject]$  ss -ltnp | grep :8080 || true
-LISTEN 0      128          0.0.0.0:8080       0.0.0.0:*    users:(("date_security_c",pid=255810,fd=9))
-[coper@coperpc DateSecurityFinalProject]$  kill 255810 && sleep 0.2 && ss -ltnp | grep :8080 || true
-[coper@coperpc DateSecurityFinalProject]$ 
-
-# 说明：
-# - 需要在系统中安装 `meson` 和 `ninja`（例如通过 `pip install meson` / 包管理器安装或系统包）。
-# - `LD_LIBRARY_PATH=libs/FAEST/builddir:` 用于运行时找到 `libfaest.so`，也可将该路径加入系统链接器搜索路径（例如 `/etc/ld.so.conf.d/` 然后 `ldconfig`）。
-# - 若不想使用共享库，可将 `libfaest.a` 静态库安装到系统链接路径并调整 `build.rs`，但仓库中默认推荐使用 `libfaest.so` 以避免 thin-archive 链接问题。
 ```
+
+说明：
+- 需要在系统中安装 `meson` 和 `ninja`（例如通过 `pip install meson` / 包管理器安装或系统包）。
+- `LD_LIBRARY_PATH=libs/FAEST/builddir:` 用于运行时找到 `libfaest.so`，也可将该路径加入系统链接器搜索路径（例如 `/etc/ld.so.conf.d/` 然后 `ldconfig`）。
+- 若不想使用共享库，可将 `libfaest.a` 静态库安装到系统链接路径并调整 `build.rs`，但仓库中默认推荐使用 `libfaest.so` 以避免 thin-archive 链接问题。
 
 启动成功后服务监听：`http://0.0.0.0:8080/`，前端页面也可通过该地址访问。
 

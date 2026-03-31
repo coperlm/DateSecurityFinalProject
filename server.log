@@ -1,0 +1,22 @@
+nohup: 忽略输入
+🔑 正在加载或生成 Admin RSA-2048 密钥对（用于变色龙哈希陷阱），路径：data/admin_rsa.pem
+✅ 成功从 admin_rsa.pem 加载 Admin 私钥
+⛓  正在初始化区块链并生成创世块...
+✅ 已从 data/chain.json 加载区块链，长度: 3
+🚀 服务已启动，监听 http://0.0.0.0:8080
+📖 前端页面: http://localhost:8080/
+📡 API 端点:
+   GET  /keys              — 生成临时测试密钥对
+   GET  /chain             — 获取完整链数据
+   GET  /faest_keys        — 生成 FAEST 密钥对 (Base64)
+   GET  /faest_admin_keys  — 生成一次性 Admin FAEST 密钥对（演示）
+   POST /encrypt_and_mine  — 加密并上链
+   POST /redact            — 合规修订（陷门碰撞）
+[info] Starting FAEST sign for tx (len payload 504)
+[info] FAEST sign completed, sig len=20696
+[info] Starting FAEST sign for tx (len payload 504)
+[info] FAEST sign completed, sig len=20696
+[info] Starting FAEST sign for tx (len payload 504)
+[info] FAEST sign completed, sig len=20696
+[info] Starting FAEST sign for tx (len payload 492)
+[info] FAEST sign completed, sig len=20696

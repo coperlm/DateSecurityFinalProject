@@ -35,7 +35,10 @@
   <div class="flex items-center gap-3 mb-1">
     <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-sm font-bold shadow-lg shadow-blue-600/30">🔐</div>
     <h1 class="text-2xl font-bold tracking-tight">企业级合规文件加密客户端</h1>
-    <span class="ml-auto text-xs bg-blue-900/50 border border-blue-700/50 text-blue-300 px-2 py-1 rounded">v0.1.0 · AES+RSA+Chameleon</span>
+    <div class="ml-auto flex items-center gap-3">
+      <button id="theme-toggle" title="切换主题" class="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded">🌙/☀️</button>
+      <span class="text-xs bg-blue-900/50 border border-blue-700/50 text-blue-300 px-2 py-1 rounded">v0.1.0 · AES+RSA+Chameleon</span>
+    </div>
   </div>
   <p class="text-gray-500 text-sm ml-11">基于 AES-GCM + RSA 数字信封 + 变色龙哈希可修订微型区块链</p>
 </header>
@@ -237,6 +240,29 @@
 
 <!-- ══════════════════════ JavaScript ══════════════════════ -->
 <script>
+// 主题切换：保存到 localStorage，页面加载时恢复
+(function(){
+  const body = document.body;
+  const key = 'ds_theme';
+  function applyTheme(t){
+    if(t === 'light'){
+      body.classList.remove('bg-gray-950','text-gray-100');
+      body.classList.add('bg-white','text-gray-900');
+      // tweak some global link/button shades (if needed)
+    } else {
+      body.classList.remove('bg-white','text-gray-900');
+      body.classList.add('bg-gray-950','text-gray-100');
+    }
+    localStorage.setItem(key, t);
+  }
+  const btn = document.getElementById('theme-toggle');
+  if(btn){
+    const pref = localStorage.getItem(key) || 'dark';
+    applyTheme(pref);
+    btn.addEventListener('click', ()=> applyTheme((localStorage.getItem(key)||'dark') === 'dark' ? 'light' : 'dark'));
+  }
+})();
+
 // ── 工具函数 ──────────────────────────────────────────────
 
 const $ = id => document.getElementById(id);

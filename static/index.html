@@ -36,9 +36,9 @@
     <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-sm font-bold shadow-lg shadow-blue-600/30">🔐</div>
     <h1 class="text-2xl font-bold tracking-tight">企业级合规文件加密客户端</h1>
     <div class="ml-auto flex items-center gap-3">
-      <button id="theme-toggle" title="切换主题" class="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded">🌙/☀️</button>
-      <span class="text-xs bg-blue-900/50 border border-blue-700/50 text-blue-300 px-2 py-1 rounded">v0.1.0 · AES+RSA+Chameleon</span>
-    </div>
+        <!-- 主题切换移除，使用统一暗色样式以保持稳定 -->
+        <span class="text-xs bg-blue-900/50 border border-blue-700/50 text-blue-300 px-2 py-1 rounded">v0.1.0 · AES+RSA+Chameleon</span>
+      </div>
   </div>
   <p class="text-gray-500 text-sm ml-11">基于 AES-GCM + RSA 数字信封 + 变色龙哈希可修订微型区块链</p>
 </header>
@@ -60,8 +60,12 @@
         <span class="text-sm text-gray-400 font-medium">🔑 FAEST 密钥对（自动填充）</span>
         <button id="btn-gen-faest-keys"
           class="text-xs bg-amber-700 hover:bg-amber-600 transition px-3 py-1.5 rounded-lg font-medium">
-          生成 FAEST 密钥并填充（用户 & Admin）
+            生成 FAEST 密钥并填充（仅用户）
         </button>
+          <button id="btn-gen-admin-faest"
+            class="text-xs bg-amber-900 hover:bg-amber-800 transition px-3 py-1.5 rounded-lg font-medium">
+            生成 Admin FAEST（一次性）
+          </button>
       </div>
       <div class="grid grid-cols-1 gap-2">
         <div>
@@ -182,17 +186,17 @@
       <p class="text-xs text-gray-400 mb-2">管理员签名（演示）</p>
       <div class="grid grid-cols-1 gap-2">
         <div>
-          <label class="text-xs text-gray-500">Admin 私钥（Base64，用于生成签名）</label>
+          <label class="text-xs text-gray-500">Admin (FAEST) 私钥（Base64，演示用，用于生成签名）</label>
           <input id="inp-admin-priv" type="text" placeholder="可填写 Admin FAEST 私钥（Base64）"
             class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-yellow-300 mt-1 outline-none focus:border-amber-600 transition" />
         </div>
         <div>
-          <label class="text-xs text-gray-500">Admin 公钥（Base64，用于服务器验签）</label>
+          <label class="text-xs text-gray-500">Admin (FAEST) 公钥（Base64，用于服务器验签，演示用）</label>
           <input id="inp-admin-pub" type="text" placeholder="Admin FAEST 公钥（Base64）"
             class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-yellow-300 mt-1 outline-none focus:border-amber-600 transition" />
         </div>
       </div>
-      <p class="text-xs text-gray-500 mt-2">说明：本演示允许在前端填写 Admin 私钥并通过后端签名接口生成签名。生产环境请勿在客户端传输私钥。</p>
+      <p class="text-xs text-gray-500 mt-2">说明：演示使用两类 Admin 密钥：<strong>服务器端的 RSA 私钥</strong>（用于变色龙哈希陷门，保存在服务端文件 <code>data/admin_rsa.pem</code>，不在前端传输）和 <strong>Admin FAEST 密钥对</strong>（用于对修订操作生成 FAEST 签名，演示允许前端提交以便模拟流程）。生产环境请勿在客户端传输私钥。</p>
     </div>
 
     <button id="btn-redact"
@@ -240,28 +244,7 @@
 
 <!-- ══════════════════════ JavaScript ══════════════════════ -->
 <script>
-// 主题切换：保存到 localStorage，页面加载时恢复
-(function(){
-  const body = document.body;
-  const key = 'ds_theme';
-  function applyTheme(t){
-    if(t === 'light'){
-      body.classList.remove('bg-gray-950','text-gray-100');
-      body.classList.add('bg-white','text-gray-900');
-      // tweak some global link/button shades (if needed)
-    } else {
-      body.classList.remove('bg-white','text-gray-900');
-      body.classList.add('bg-gray-950','text-gray-100');
-    }
-    localStorage.setItem(key, t);
-  }
-  const btn = document.getElementById('theme-toggle');
-  if(btn){
-    const pref = localStorage.getItem(key) || 'dark';
-    applyTheme(pref);
-    btn.addEventListener('click', ()=> applyTheme((localStorage.getItem(key)||'dark') === 'dark' ? 'light' : 'dark'));
-  }
-})();
+// 主题切换功能已移除以保证界面稳定性，默认使用暗色主题。
 
 // ── 工具函数 ──────────────────────────────────────────────
 
@@ -287,10 +270,19 @@ async function genFaestKeys() {
     // 填充发送方密钥
     if ($('inp-privkey')) $('inp-privkey').value = data.faest_private_key || '';
     if ($('inp-pubkey'))  $('inp-pubkey').value  = data.faest_public_key || '';
-    // 同时填充 Admin 密钥字段（演示用途）
-    if ($('inp-admin-priv')) $('inp-admin-priv').value = data.faest_private_key || '';
-    if ($('inp-admin-pub'))  $('inp-admin-pub').value  = data.faest_public_key || '';
-    showToast('✅ FAEST 密钥已生成并填充（用户 & Admin）');
+      showToast('✅ FAEST 用户密钥已生成并填充');
+  // 生成一次性 Admin FAEST 密钥（演示）
+  async function genAdminFaestKeys(){
+    try{
+      const res = await fetch('/faest_admin_keys');
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      const data = await res.json();
+      if ($('inp-admin-priv')) $('inp-admin-priv').value = data.faest_private_key || '';
+      if ($('inp-admin-pub'))  $('inp-admin-pub').value  = data.faest_public_key || '';
+      showToast('✅ Admin FAEST（一次性）已生成并填充（仅演示）');
+    }catch(e){ console.error('genAdminFaestKeys error', e); showToast('❌ Admin 密钥生成失败', false); }
+  }
+  if ($('btn-gen-admin-faest')) { $('btn-gen-admin-faest').addEventListener('click', genAdminFaestKeys); }
   } catch(e) {
     console.error('genFaestKeys error', e);
     showToast('❌ FAEST 密钥生成失败: ' + (e.message || e), false);
@@ -313,6 +305,12 @@ async function setStep(id, state) {
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 $('btn-encrypt-mine').addEventListener('click', async () => {
+  // 在开始流程前检查后端是否在线
+  try {
+    const alive = await isServerAlive();
+    if (!alive) { showToast('❌ 后端服务不可用，请先启动后再尝试', false); return; }
+  } catch(e) { showToast('❌ 无法联系后端: ' + e.message, false); return; }
+
   const plaintext = $('inp-plaintext').value.trim();
   const privKey   = $('inp-privkey').value.trim();
   const pubKey    = $('inp-pubkey').value.trim();
@@ -386,6 +384,20 @@ $('btn-encrypt-mine').addEventListener('click', async () => {
     showToast('❌ 请求失败: ' + e.message, false);
   }
 });
+
+// 简单的服务连通性检测（请求 /health，带超时）
+async function isServerAlive(timeoutMs = 1500) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch('/health', { signal: controller.signal, cache: 'no-store' });
+    clearTimeout(id);
+    return res.ok;
+  } catch(e) {
+    clearTimeout(id);
+    return false;
+  }
+}
 
 // ── 加载并渲染链数据 ──────────────────────────────────────
 

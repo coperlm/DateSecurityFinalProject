@@ -33,6 +33,7 @@ use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 use rsa::pkcs8::EncodePublicKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tower_http::services::ServeDir;
 
 // ────────────────────────────────────────────────────────────────────────────
 // § 1  共享应用状态
@@ -418,6 +419,7 @@ async fn get_block_plain(
                 Json(ErrorResponse {
                     error: format!("区块 {} 不存在", index),
                 }),
+                // 验证链完整性（使用当前 Admin RSA 派生的变色龙哈希参数）
             )
                 .into_response()
         }
@@ -499,8 +501,15 @@ async fn main() -> Result<()> {
     // 优化：将 Admin 私钥持久化到磁盘，保证重启后仍能解密此前上链的数字信封。
     use std::fs;
     use std::path::Path;
-    let admin_pem_path = Path::new("admin_rsa.pem");
-    println!("🔑 正在加载或生成 Admin RSA-2048 密钥对（用于变色龙哈希陷阱）...");
+    let admin_pem_path = Path::new("data/admin_rsa.pem");
+    println!("🔑 正在加载或生成 Admin RSA-2048 密钥对（用于变色龙哈希陷阱），路径：{}", admin_pem_path.display());
+
+    // 确保 data/ 目录存在
+    if let Some(parent) = admin_pem_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            println!("⚠️ 无法创建目录 {}: {}", parent.display(), e);
+        }
+    }
     let (admin_rsa_priv, admin_rsa_pub) = if admin_pem_path.exists() {
         // 尝试从 PEM 加载私钥
         match fs::read_to_string(admin_pem_path) {
@@ -544,9 +553,8 @@ async fn main() -> Result<()> {
     // 初始化区块链并生成创世块（使用 FAEST 密钥作为创世签名示例）
     println!("⛓  正在初始化区块链并生成创世块...");
     // 尝试从磁盘加载已存在的链（位于 data/chain.json），若不存在则生成创世块并持久化。
-    use std::path::Path;
     let chain_path = Path::new("data/chain.json").to_path_buf();
-    let mut blockchain: Blockchain = if chain_path.exists() {
+    let blockchain: Blockchain = if chain_path.exists() {
         match Blockchain::load_from_path(&chain_path) {
             Ok(bc) => {
                 println!(
@@ -591,6 +599,7 @@ async fn main() -> Result<()> {
     // 配置路由
     let app = Router::new()
         .route("/", get(serve_index))
+        .route("/health", get(|| async { (StatusCode::OK, Json(serde_json::json!({"ok": true}))) }))
         .route("/keys", get(get_keys))
         .route("/faest_keys", get(get_faest_keys))
         .route("/chain", get(get_chain))
@@ -599,6 +608,7 @@ async fn main() -> Result<()> {
         .route("/block_plain/:index", get(get_block_plain))
         .route("/encrypt_and_mine", post(encrypt_and_mine))
         .route("/redact", post(redact_block))
+        .nest_service("/static", ServeDir::new("static"))
         .with_state(state);
 
     let addr = "0.0.0.0:8080";

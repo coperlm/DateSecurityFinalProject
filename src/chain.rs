@@ -211,6 +211,11 @@ impl Blockchain {
     /// 2. 计算变色龙哈希；
     /// 3. 追加区块。
     pub fn add_block(&mut self, ch: &ChameleonHash, tx: Transaction) -> Result<()> {
+        // 先检查 pubkey 是否存在（非空）
+        if tx.sender_pub_key.trim().is_empty() {
+            return Err(anyhow!("交易缺少 sender_pub_key，无法验证签名"));
+        }
+
         // 验证签名（使用后量子 FAEST）
         let signer = FaestImpl;
         let payload_bytes = payload_to_bytes(&tx.payload);

@@ -7,12 +7,27 @@ use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
+use chrono::Utc;
 use tokio::time::timeout;
 use std::time::Duration;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::pkcs8::EncodePublicKey;
 use serde::{Deserialize, Serialize};
+
+static LAST_ERRORS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+fn record_error(err: String) {
+    let mut store = LAST_ERRORS.lock().unwrap();
+    store.push(err);
+    while store.len() > 50 { store.remove(0); }
+}
+
+fn trace(msg: &str) {
+    println!("[{}] {}", Utc::now().to_rfc3339(), msg);
+}
 
 #[derive(Deserialize, Clone)]
 pub struct EncryptAndMineRequest {
@@ -104,6 +119,23 @@ pub async fn get_block_plain(
     }
     let block = block.unwrap().clone();
 
+    // 处理变色龙合规修订之后的红acted 区块，避免解密失败
+    if block.tx.payload.encrypted_key == "UkVEQUNURUQ=" {
+        let redacted_plain = match B64.decode(&block.tx.payload.ciphertext) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Err(_) => "【已合规抹除】".to_string(),
+        };
+        return Json(serde_json::json!({
+            "success": true,
+            "redacted": true,
+            "plaintext_base64": B64.encode(redacted_plain.as_bytes()),
+            "plaintext_utf8": redacted_plain,
+            "filename": block.tx.payload.filename,
+            "mime_type": block.tx.payload.mime_type,
+            "block_index": index,
+        })).into_response();
+    }
+
     let ciphertext = match B64.decode(&block.tx.payload.ciphertext) {
         Ok(b) => b,
         Err(e) => return internal_error(format!("payload ciphertext 解码失败: {}", e)).into_response(),
@@ -185,11 +217,17 @@ pub async fn get_admin_rsa(State(state): State<std::sync::Arc<AppState>>) -> imp
     let n_str = state.admin_rsa_pub.n().to_str_radix(10);
     let e_str = state.admin_rsa_pub.e().to_str_radix(10);
     let d_str = state.admin_rsa_priv.d().to_str_radix(10);
-    let mask = |s: &str| {
-        if s.len() <= 16 { "****".to_string() } else { let first = &s[..6]; let last = &s[s.len()-6..]; format!("{}{}{}", first, "*".repeat(24), last) }
+    let d_masked = if d_str.len() <= 24 {
+        d_str.clone()
+    } else {
+        format!("{}...{}", &d_str[..6], &d_str[d_str.len()-6..])
     };
-    let d_masked = mask(&d_str);
-    Json(serde_json::json!({"ok": true, "n": n_str, "e": e_str, "d_masked": d_masked, "d_present": true})).into_response()
+    Json(serde_json::json!({"ok": true, "n": n_str, "e": e_str, "d_masked": d_masked})).into_response()
+}
+
+pub async fn debug_last_errors() -> impl IntoResponse {
+    let store = LAST_ERRORS.lock().unwrap();
+    Json(serde_json::json!({"last_errors": store.clone()})).into_response()
 }
 
 pub async fn get_chain_and_mine(
@@ -205,6 +243,7 @@ pub async fn get_chain_and_mine(
 
     tokio::spawn(async move {
         let op_id = op_id_for_task;
+        trace(&format!("encrypt_and_mine op={} 新请求开始", op_id));
         progress::update_progress_step(&op_id, "envelope_encrypt", "in_progress", None);
 
         let sender_priv = match B64.decode(&req_cloned.sender_private_key) {
@@ -240,11 +279,15 @@ pub async fn get_chain_and_mine(
         let envelope_result = match envelope_encrypt(&plaintext_bytes, &state_cloned.admin_rsa_pub) {
             Ok(r) => r,
             Err(e) => {
-                progress::update_progress_step(&op_id, "envelope_encrypt", "failed", Some(format!("envelope encrypt failed: {}", e)));
+                let msg = format!("envelope encrypt failed: {}", e);
+                trace(&format!("encrypt_and_mine op={} error {}", op_id, msg));
+                record_error(format!("op={} envelope_encrypt error: {}", op_id, msg));
+                progress::update_progress_step(&op_id, "envelope_encrypt", "failed", Some(msg));
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
         };
+        trace(&format!("encrypt_and_mine op={} envelope_encrypt done", op_id));
         progress::update_progress_step(&op_id, "envelope_encrypt", "done", None);
 
         // 继续 faest_sign
@@ -271,14 +314,23 @@ pub async fn get_chain_and_mine(
         .await;
 
         let sig = match sign_res {
-            Ok(Ok(s)) => s,
+            Ok(Ok(s)) => {
+                trace(&format!("encrypt_and_mine op={} faest_sign done", op_id));
+                s
+            }
             Ok(Err(e)) => {
-                progress::update_progress_step(&op_id, "faest_sign", "failed", Some(format!("FAEST sign failed: {}", e)));
+                let msg = format!("FAEST sign failed: {}", e);
+                trace(&format!("encrypt_and_mine op={} error {}", op_id, msg));
+                record_error(format!("op={} faest_sign error: {}", op_id, msg));
+                progress::update_progress_step(&op_id, "faest_sign", "failed", Some(msg));
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
             Err(join_err) => {
-                progress::update_progress_step(&op_id, "faest_sign", "failed", Some(format!("FAEST sign join error: {}", join_err)));
+                let msg = format!("FAEST sign join error: {}", join_err);
+                trace(&format!("encrypt_and_mine op={} error {}", op_id, msg));
+                record_error(format!("op={} faest_sign error: {}", op_id, msg));
+                progress::update_progress_step(&op_id, "faest_sign", "failed", Some(msg));
                 progress::set_progress_done(&op_id, false, None);
                 return;
             }
@@ -295,12 +347,20 @@ pub async fn get_chain_and_mine(
         // ch_compute
         progress::update_progress_step(&op_id, "ch_compute", "in_progress", None);
         let mut chain = state_cloned.chain.write().await;
-        if let Err(e) = chain.add_block(&state_cloned.ch, tx) {
-            progress::update_progress_step(&op_id, "ch_compute", "failed", Some(format!("add_block failed: {}", e)));
-            progress::set_progress_done(&op_id, false, None);
-            return;
+        match chain.add_block(&state_cloned.ch, tx) {
+            Ok(()) => {
+                trace(&format!("encrypt_and_mine op={} ch_compute done", op_id));
+                progress::update_progress_step(&op_id, "ch_compute", "done", None);
+            }
+            Err(e) => {
+                let msg = format!("add_block failed: {}", e);
+                trace(&format!("encrypt_and_mine op={} error {}", op_id, msg));
+                record_error(format!("op={} ch_compute error: {}", op_id, msg));
+                progress::update_progress_step(&op_id, "ch_compute", "failed", Some(msg));
+                progress::set_progress_done(&op_id, false, None);
+                return;
+            }
         }
-        progress::update_progress_step(&op_id, "ch_compute", "done", None);
 
         // persist_chain
         progress::update_progress_step(&op_id, "persist_chain", "in_progress", None);
@@ -350,6 +410,7 @@ pub async fn redact_block(
 
     tokio::spawn(async move {
         let op_id = op_id_for_task;
+        trace(&format!("redact op={} start", op_id));
         progress::update_progress_step(&op_id, "prepare", "in_progress", None);
 
         let label = req_cloned.redaction_label.unwrap_or_else(|| "【已合规抹除】".to_string());

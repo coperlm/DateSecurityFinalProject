@@ -95,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/faest_admin_keys", get(handlers::get_faest_admin_keys))
         .route("/faest_admin_keys", post(handlers::post_faest_admin_keys))
         .route("/admin_rsa", get(handlers::get_admin_rsa))
+        .route("/debug/last_errors", get(handlers::debug_last_errors))
         .route("/chain", get(handlers::get_chain))
         .route("/progress/:id", get(handlers::get_progress))
         .route("/redact_prepare", post(handlers::redact_prepare))

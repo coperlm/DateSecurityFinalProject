@@ -65,7 +65,7 @@
             生成 FAEST 密钥并填充（仅用户）
         </button>
           <button id="btn-gen-admin-faest"
-            class="text-xs bg-amber-900 hover:bg-amber-800 transition px-3 py-1.5 rounded-lg font-medium">
+            class="text-xs bg-lime-500 hover:bg-lime-400 text-gray-900 transition px-3 py-1.5 rounded-lg font-medium">
             生成 Admin FAEST（一次性）
           </button>
       </div>
@@ -200,14 +200,14 @@
       </div>
       <div class="mt-3 grid grid-cols-1 gap-2">
         <div>
-          <label class="text-xs text-gray-500">Admin RSA 私钥（数字形式，演示：d=...）</label>
-          <textarea id="inp-admin-rsa-priv" rows="1" readonly
-            class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-amber-200 mt-1 outline-none no-wrap-ellipsis" ></textarea>
+          <label class="text-xs text-gray-500">Admin RSA 私钥摘录（d=...，仅演示，已截断）</label>
+          <textarea id="inp-admin-rsa-priv" rows="2" readonly
+            class="mono w-full min-h-[72px] bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-amber-200 mt-1 outline-none no-wrap-ellipsis" ></textarea>
         </div>
         <div>
-          <label class="text-xs text-gray-500">Admin RSA 公钥（数字形式，演示：n=...，e=...）</label>
-          <textarea id="inp-admin-rsa-pub" rows="1" readonly
-            class="mono w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-amber-200 mt-1 outline-none no-wrap-ellipsis"></textarea>
+          <label class="text-xs text-gray-500">Admin RSA 公钥（n/e，演示）</label>
+          <textarea id="inp-admin-rsa-pub" rows="2" readonly
+            class="mono w-full min-h-[72px] bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-amber-200 mt-1 outline-none no-wrap-ellipsis"></textarea>
         </div>
       </div>
       <p class="text-xs text-gray-500 mt-2">说明：演示使用两类 Admin 密钥：<strong>服务器端的 RSA 私钥</strong>（用于变色龙哈希陷门，保存在服务端文件 <code>data/admin_rsa.pem</code>，不在前端传输）和 <strong>Admin FAEST 密钥对</strong>（用于对修订操作生成 FAEST 签名，演示允许前端提交以便模拟流程）。生产环境请勿在客户端传输私钥。</p>
@@ -219,7 +219,7 @@
     </button>
 
     <!-- 修订结果对比面板 -->
-    <div id="redact-result" class="hidden mt-5 anim-slide-in">n=
+    <div id="redact-result" class="hidden mt-5 anim-slide-in">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <!-- 修订前 -->
         <div class="p-4 bg-gray-800/60 rounded-xl border border-gray-700/50">
@@ -272,6 +272,19 @@ function showToast(msg, ok=true) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 3500);
+}
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...opts, signal: controller.signal });
+    clearTimeout(id);
+    return response;
+  } catch(err) {
+    clearTimeout(id);
+    throw err;
+  }
 }
 
 // ── 生成密钥对 ────────────────────────────────────────────
@@ -403,11 +416,11 @@ $('btn-encrypt-mine').addEventListener('click', async () => {
       body = JSON.stringify({ plaintext_base64: false, plaintext: plaintext, sender_private_key: privKey, sender_public_key: pubKey });
     }
 
-    const res  = await fetch('/encrypt_and_mine', {
+    const res  = await fetchWithTimeout('/encrypt_and_mine', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body
-    });
+    }, 60000);
     if (!res.ok) {
       let errMsg = '';
       try { const j = await res.json(); errMsg = j.error || j.message || JSON.stringify(j); } catch(_) { errMsg = await res.text().catch(()=>String(res.status)); }
@@ -740,7 +753,7 @@ $('btn-redact').addEventListener('click', async () => {
 
   let oldPayload = '', oldR = '';
   try {
-    const chainRes = await fetch('/chain');
+    const chainRes = await fetchWithTimeout('/chain', {}, 10000);
     const chainData = await chainRes.json();
     const blocks = chainData.blocks || [];
     if (blockIndex < blocks.length) {
@@ -753,27 +766,27 @@ $('btn-redact').addEventListener('click', async () => {
 
   try {
     // 1) 准备待签名数据
-    const prepRes = await fetch('/redact_prepare', {
+    const prepRes = await fetchWithTimeout('/redact_prepare', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({block_index:blockIndex, redaction_label:redactLabel})
-    });
+    }, 30000);
     if (!prepRes.ok) throw new Error('redact_prepare 请求失败: ' + prepRes.status);
     const prepData = await prepRes.json();
     if (!prepData.message_base64) throw new Error('redact_prepare 未返回 message_base64');
 
     // 2) Admin 签名
-    const signRes = await fetch('/admin_sign', {
+    const signRes = await fetchWithTimeout('/admin_sign', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({private_key_base64: adminPriv, message_base64: prepData.message_base64})
-    });
+    }, 30000);
     if (!signRes.ok) throw new Error('admin_sign 请求失败: ' + signRes.status);
     const signData = await signRes.json();
     if (!signData.signature_base64) throw new Error('admin_sign 未返回 signature_base64');
 
     // 3) 提交 redact，并获取 op_id
-    const redactRes = await fetch('/redact', {
+    const redactRes = await fetchWithTimeout('/redact', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
@@ -782,7 +795,7 @@ $('btn-redact').addEventListener('click', async () => {
         admin_public_key: adminPub,
         admin_signature: signData.signature_base64,
       }),
-    });
+    }, 60000);
     if (!redactRes.ok) {
       const txt = await redactRes.text().catch(()=>String(redactRes.status));
       throw new Error('redact 请求失败: ' + txt);

@@ -16,15 +16,6 @@ Example: $0 --faest --rust
 EOF
 }
 
-# 仅运行（不重建）：
-# run.sh
-# 先重建 FAEST，再运行：
-# run.sh --faest --rust
-# 只重建 Rust（不重建 FAEST）：
-# run.sh --rust
-# 运行时不编译 wrapper（若不需要编译 C wrapper）：
-# run.sh --no-wrapper
-
 REBUILD_FAEST=0
 REBUILD_RUST=0
 BUILD_WRAPPER=1

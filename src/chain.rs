@@ -6,8 +6,10 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::Utc;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 
-use crate::crypto::{ChameleonHash, FaestImpl, PqSignature, envelope_encrypt};
+use crate::crypto::{envelope_encrypt, ChameleonHash, FaestImpl, PqSignature};
 use rsa::RsaPublicKey;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -132,6 +134,26 @@ impl Blockchain {
         Blockchain { blocks: Vec::new() }
     }
 
+    /// 从指定路径加载链（JSON 格式）。返回 Err 表示读取或反序列化失败。
+    pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let s = fs::read_to_string(path).map_err(|e| anyhow!("读取区块链文件失败: {}", e))?;
+        let bc: Blockchain =
+            serde_json::from_str(&s).map_err(|e| anyhow!("解析区块链 JSON 失败: {}", e))?;
+        Ok(bc)
+    }
+
+    /// 将当前链序列化并写入指定路径（父目录若不存在则创建）。
+    pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let p = path.as_ref();
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| anyhow!("创建数据目录失败: {}", e))?;
+        }
+        let s =
+            serde_json::to_string_pretty(self).map_err(|e| anyhow!("序列化区块链失败: {}", e))?;
+        fs::write(p, s).map_err(|e| anyhow!("写入区块链文件失败: {}", e))?;
+        Ok(())
+    }
+
     /// 创建并追加创世块。
     /// 创世块使用占位 Transaction（payload 为空字符串加密结果），prev_hash 为 "0"*64。
     pub fn genesis_block(
@@ -188,11 +210,7 @@ impl Blockchain {
     /// 1. 验证发送者签名；
     /// 2. 计算变色龙哈希；
     /// 3. 追加区块。
-    pub fn add_block(
-        &mut self,
-        ch: &ChameleonHash,
-        tx: Transaction,
-    ) -> Result<()> {
+    pub fn add_block(&mut self, ch: &ChameleonHash, tx: Transaction) -> Result<()> {
         // 验证签名（使用后量子 FAEST）
         let signer = FaestImpl;
         let payload_bytes = payload_to_bytes(&tx.payload);
@@ -251,12 +269,8 @@ impl Blockchain {
             .clone();
 
         // 重新计算旧内容字节（用于 forge）
-        let old_content = block_content_bytes(
-            block.index,
-            block.timestamp,
-            &block.tx,
-            &block.prev_hash,
-        );
+        let old_content =
+            block_content_bytes(block.index, block.timestamp, &block.tx, &block.prev_hash);
 
         let old_r = hex_to_biguint(&block.randomness)?;
 
@@ -278,12 +292,8 @@ impl Blockchain {
         };
 
         // 新内容字节（注意 timestamp 和 prev_hash 保持不变，以维持链接关系）
-        let new_content = block_content_bytes(
-            block.index,
-            block.timestamp,
-            &redacted_tx,
-            &block.prev_hash,
-        );
+        let new_content =
+            block_content_bytes(block.index, block.timestamp, &redacted_tx, &block.prev_hash);
 
         // 利用陷门计算新随机数 r'，使 CH(new_content, r') == CH(old_content, old_r)
         let r_prime = ch.forge(&old_content, &old_r, &new_content)?;
@@ -334,12 +344,8 @@ impl Blockchain {
             sender_pub_key: block.tx.sender_pub_key.clone(),
         };
 
-        let new_content = block_content_bytes(
-            block.index,
-            block.timestamp,
-            &redacted_tx,
-            &block.prev_hash,
-        );
+        let new_content =
+            block_content_bytes(block.index, block.timestamp, &redacted_tx, &block.prev_hash);
 
         Ok(new_content)
     }
@@ -356,12 +362,8 @@ impl Blockchain {
             }
 
             // 验证当前区块的变色龙哈希
-            let content = block_content_bytes(
-                block.index,
-                block.timestamp,
-                &block.tx,
-                &block.prev_hash,
-            );
+            let content =
+                block_content_bytes(block.index, block.timestamp, &block.tx, &block.prev_hash);
             let r = match hex_to_biguint(&block.randomness) {
                 Ok(r) => r,
                 Err(_) => return false,
@@ -408,7 +410,9 @@ mod tests {
         let mut chain = Blockchain::new();
 
         // 创世块
-        chain.genesis_block(&ch, &rsa_pub, &faest_priv, &faest_pub).unwrap();
+        chain
+            .genesis_block(&ch, &rsa_pub, &faest_priv, &faest_pub)
+            .unwrap();
         assert_eq!(chain.blocks.len(), 1);
 
         // 添加新区块
@@ -442,7 +446,9 @@ mod tests {
     fn test_redact_preserves_hash() {
         let (ch, rsa_pub, faest_priv, faest_pub) = setup();
         let mut chain = Blockchain::new();
-        chain.genesis_block(&ch, &rsa_pub, &faest_priv, &faest_pub).unwrap();
+        chain
+            .genesis_block(&ch, &rsa_pub, &faest_priv, &faest_pub)
+            .unwrap();
 
         let original_hash = chain.blocks[0].hash.clone();
         chain.redact_block(0, &ch, "【已合规抹除】").unwrap();

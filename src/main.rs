@@ -6,31 +6,31 @@
 //   POST /redact            — 合规修订（陷门碰撞）
 //   GET  /                  — 前端页面（静态文件）
 
-mod crypto;
 mod chain;
+mod crypto;
 mod faest_ffi;
 
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::extract::Path;
 use axum::{
     extract::State,
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chain::{Blockchain, EncryptedPayload, Transaction};
-use crypto::{
-    ChameleonHash, FaestImpl, PqSignature,
-    envelope_encrypt, generate_faest_keypair, generate_rsa_keypair,
-};
-use crypto::EnvelopeResult;
 use crypto::envelope_decrypt;
-use axum::extract::Path;
-use rsa::pkcs8::EncodePublicKey;
+use crypto::EnvelopeResult;
+use crypto::{
+    envelope_encrypt, generate_faest_keypair, generate_rsa_keypair, ChameleonHash, FaestImpl,
+    PqSignature,
+};
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
+use rsa::pkcs8::EncodePublicKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -48,6 +48,8 @@ struct AppState {
     admin_rsa_pub: rsa::RsaPublicKey,
     /// Admin RSA 私钥（用于示例解密与后台合规修订）
     admin_rsa_priv: rsa::RsaPrivateKey,
+    /// 本地链文件路径（持久化位置）
+    chain_file: std::path::PathBuf,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -141,7 +143,8 @@ async fn get_faest_keys() -> impl IntoResponse {
         Ok((pk, sk)) => Json(serde_json::json!({
             "faest_public_key": B64.encode(&pk),
             "faest_private_key": B64.encode(&sk),
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => internal_error(format!("FAEST keygen failed: {}", e)).into_response(),
     }
 }
@@ -178,7 +181,9 @@ async fn encrypt_and_mine(
     let plaintext_bytes: Vec<u8> = if req.plaintext_base64.unwrap_or(false) {
         match base64::engine::general_purpose::STANDARD.decode(&req.plaintext) {
             Ok(b) => b,
-            Err(e) => return internal_error(format!("plaintext Base64 解码失败: {}", e)).into_response(),
+            Err(e) => {
+                return internal_error(format!("plaintext Base64 解码失败: {}", e)).into_response()
+            }
         }
     } else {
         req.plaintext.as_bytes().to_vec()
@@ -217,6 +222,27 @@ async fn encrypt_and_mine(
     match chain.add_block(&state.ch, tx) {
         Ok(_) => {
             let new_block = chain.blocks.last().cloned();
+            // 持久化链到磁盘（异步写入）
+            let save_path = state.chain_file.clone();
+            let chain_clone = chain.clone();
+            let _ = tokio::spawn(async move {
+                if let Err(e) = tokio::fs::create_dir_all(
+                    save_path.parent().unwrap_or(std::path::Path::new(".")),
+                )
+                .await
+                {
+                    eprintln!("保存链失败 (创建目录): {}", e);
+                    return;
+                }
+                match serde_json::to_string_pretty(&chain_clone) {
+                    Ok(s) => {
+                        if let Err(e) = tokio::fs::write(&save_path, s).await {
+                            eprintln!("保存链失败: {}", e);
+                        }
+                    }
+                    Err(e) => eprintln!("序列化链失败: {}", e),
+                }
+            });
             Json(serde_json::json!({
                 "success": true,
                 "message": "交易已成功打包上链",
@@ -263,11 +289,17 @@ async fn redact_block(
     // 验证 admin 的 FAEST 签名（admin_pub_b64 + admin_sig_b64）
     let admin_pub = match base64::engine::general_purpose::STANDARD.decode(&admin_pub_b64) {
         Ok(b) => b,
-        Err(e) => return internal_error(format!("admin_public_key Base64 解码失败: {}", e)).into_response(),
+        Err(e) => {
+            return internal_error(format!("admin_public_key Base64 解码失败: {}", e))
+                .into_response()
+        }
     };
     let admin_sig = match base64::engine::general_purpose::STANDARD.decode(&admin_sig_b64) {
         Ok(b) => b,
-        Err(e) => return internal_error(format!("admin_signature Base64 解码失败: {}", e)).into_response(),
+        Err(e) => {
+            return internal_error(format!("admin_signature Base64 解码失败: {}", e))
+                .into_response()
+        }
     };
 
     let signer = FaestImpl;
@@ -281,6 +313,27 @@ async fn redact_block(
     match chain.redact_block(req.block_index, &state.ch, &label) {
         Ok(_) => {
             let updated_block = chain.blocks.get(req.block_index).cloned();
+            // 持久化链到磁盘（异步写入）
+            let save_path = state.chain_file.clone();
+            let chain_clone = chain.clone();
+            let _ = tokio::spawn(async move {
+                if let Err(e) = tokio::fs::create_dir_all(
+                    save_path.parent().unwrap_or(std::path::Path::new(".")),
+                )
+                .await
+                {
+                    eprintln!("保存链失败 (创建目录): {}", e);
+                    return;
+                }
+                match serde_json::to_string_pretty(&chain_clone) {
+                    Ok(s) => {
+                        if let Err(e) = tokio::fs::write(&save_path, s).await {
+                            eprintln!("保存链失败: {}", e);
+                        }
+                    }
+                    Err(e) => eprintln!("序列化链失败: {}", e),
+                }
+            });
             Json(serde_json::json!({
                 "success": true,
                 "message": format!("区块 {} 已合规修订，区块哈希保持不变", req.block_index),
@@ -304,7 +357,9 @@ async fn redact_prepare(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RedactPrepareRequest>,
 ) -> impl IntoResponse {
-    let label = req.redaction_label.unwrap_or_else(|| "【已合规抹除】".to_string());
+    let label = req
+        .redaction_label
+        .unwrap_or_else(|| "【已合规抹除】".to_string());
     let chain = state.chain.read().await;
     match chain.redaction_content_bytes(req.block_index, &label) {
         Ok(content) => Json(serde_json::json!({ "message_base64": base64::engine::general_purpose::STANDARD.encode(&content) })).into_response(),
@@ -320,9 +375,12 @@ struct AdminSignRequest {
 }
 
 async fn admin_sign(Json(req): Json<AdminSignRequest>) -> impl IntoResponse {
-    let priv_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.private_key_base64) {
+    let priv_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.private_key_base64)
+    {
         Ok(b) => b,
-        Err(e) => return internal_error(format!("private_key Base64 解码失败: {}", e)).into_response(),
+        Err(e) => {
+            return internal_error(format!("private_key Base64 解码失败: {}", e)).into_response()
+        }
     };
     let msg = match base64::engine::general_purpose::STANDARD.decode(&req.message_base64) {
         Ok(b) => b,
@@ -354,13 +412,23 @@ async fn get_block_plain(
     let chain = state.chain.read().await;
     let block = match chain.blocks.get(index) {
         Some(b) => b.clone(),
-        None => return (StatusCode::NOT_FOUND, Json(ErrorResponse{ error: format!("区块 {} 不存在", index) } )).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("区块 {} 不存在", index),
+                }),
+            )
+                .into_response()
+        }
     };
 
     // 从 Block 中恢复 EnvelopeResult
     let ciphertext = match B64.decode(&block.tx.payload.ciphertext) {
         Ok(b) => b,
-        Err(e) => return internal_error(format!("payload ciphertext 解码失败: {}", e)).into_response(),
+        Err(e) => {
+            return internal_error(format!("payload ciphertext 解码失败: {}", e)).into_response()
+        }
     };
     let nonce = match B64.decode(&block.tx.payload.nonce) {
         Ok(b) => b,
@@ -388,7 +456,8 @@ async fn get_block_plain(
                 "filename": block.tx.payload.filename,
                 "mime_type": block.tx.payload.mime_type,
                 "block_index": index,
-            })) .into_response()
+            }))
+            .into_response()
         }
         Err(e) => internal_error(e).into_response(),
     }
@@ -428,8 +497,8 @@ fn new_uuid() -> String {
 async fn main() -> Result<()> {
     // 初始化 Admin RSA 密钥对（变色龙哈希参数来源）
     // 优化：将 Admin 私钥持久化到磁盘，保证重启后仍能解密此前上链的数字信封。
-    use std::path::Path;
     use std::fs;
+    use std::path::Path;
     let admin_pem_path = Path::new("admin_rsa.pem");
     println!("🔑 正在加载或生成 Admin RSA-2048 密钥对（用于变色龙哈希陷阱）...");
     let (admin_rsa_priv, admin_rsa_pub) = if admin_pem_path.exists() {
@@ -445,14 +514,18 @@ async fn main() -> Result<()> {
                     println!("⚠️ 从 admin_rsa.pem 解析私钥失败，将重新生成：{}", e);
                     let (p, pubk) = generate_rsa_keypair()?;
                     // 覆写文件
-                    if let Ok(pem) = p.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF) { let _ = fs::write(admin_pem_path, pem); }
+                    if let Ok(pem) = p.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF) {
+                        let _ = fs::write(admin_pem_path, pem);
+                    }
                     (p, pubk)
                 }
             },
             Err(e) => {
                 println!("⚠️ 读取 admin_rsa.pem 失败，将重新生成：{}", e);
                 let (p, pubk) = generate_rsa_keypair()?;
-                if let Ok(pem) = p.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF) { let _ = fs::write(admin_pem_path, pem); }
+                if let Ok(pem) = p.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF) {
+                    let _ = fs::write(admin_pem_path, pem);
+                }
                 (p, pubk)
             }
         }
@@ -470,16 +543,49 @@ async fn main() -> Result<()> {
 
     // 初始化区块链并生成创世块（使用 FAEST 密钥作为创世签名示例）
     println!("⛓  正在初始化区块链并生成创世块...");
-    let (genesis_priv, genesis_pub) = generate_faest_keypair();
-    let mut blockchain = Blockchain::new();
-    blockchain.genesis_block(&ch, &admin_rsa_pub, &genesis_priv, &genesis_pub)?;
-    println!("✅ 创世块已生成，链长度: {}", blockchain.blocks.len());
+    // 尝试从磁盘加载已存在的链（位于 data/chain.json），若不存在则生成创世块并持久化。
+    use std::path::Path;
+    let chain_path = Path::new("data/chain.json").to_path_buf();
+    let mut blockchain: Blockchain = if chain_path.exists() {
+        match Blockchain::load_from_path(&chain_path) {
+            Ok(bc) => {
+                println!(
+                    "✅ 已从 {} 加载区块链，长度: {}",
+                    chain_path.display(),
+                    bc.blocks.len()
+                );
+                bc
+            }
+            Err(e) => {
+                println!("⚠️ 载入区块链失败，改为生成新链: {}", e);
+                let (genesis_priv, genesis_pub) = generate_faest_keypair();
+                let mut bc = Blockchain::new();
+                bc.genesis_block(&ch, &admin_rsa_pub, &genesis_priv, &genesis_pub)?;
+                // 尝试保存
+                if let Err(e) = bc.save_to_path(&chain_path) {
+                    println!("⚠️ 保存新链到磁盘失败: {}", e);
+                }
+                bc
+            }
+        }
+    } else {
+        let (genesis_priv, genesis_pub) = generate_faest_keypair();
+        let mut bc = Blockchain::new();
+        bc.genesis_block(&ch, &admin_rsa_pub, &genesis_priv, &genesis_pub)?;
+        // 保存初始链到磁盘
+        if let Err(e) = bc.save_to_path(&chain_path) {
+            println!("⚠️ 保存创世链到磁盘失败: {}", e);
+        }
+        println!("✅ 创世块已生成并持久化，链长度: {}", bc.blocks.len());
+        bc
+    };
 
     let state = Arc::new(AppState {
         ch,
         chain: RwLock::new(blockchain),
         admin_rsa_pub,
         admin_rsa_priv: admin_rsa_priv,
+        chain_file: chain_path,
     });
 
     // 配置路由
@@ -510,4 +616,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-

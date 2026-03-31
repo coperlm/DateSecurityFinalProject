@@ -7,8 +7,14 @@ fn main() {
     // If the FAEST build directory doesn't exist, try to build it with meson/ninja (best-effort).
     if !Path::new(libdir).exists() {
         eprintln!("FAEST builddir not found, attempting meson/ninja build in libs/FAEST/");
-        let _ = Command::new("meson").args(["setup", "builddir"]).current_dir("libs/FAEST").status();
-        let _ = Command::new("ninja").args(["-C", "builddir"]).current_dir("libs/FAEST").status();
+        let _ = Command::new("meson")
+            .args(["setup", "builddir"])
+            .current_dir("libs/FAEST")
+            .status();
+        let _ = Command::new("ninja")
+            .args(["-C", "builddir"])
+            .current_dir("libs/FAEST")
+            .status();
     }
 
     // Compile the small C wrapper (libs/FAEST/faest_wrapper.c) so we have stable symbols to call.

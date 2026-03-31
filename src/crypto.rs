@@ -10,16 +10,13 @@ use anyhow::{anyhow, Result};
 use cmac::{Cmac, Mac};
 use sha2::{Digest, Sha256};
 // Ed25519 卸载：使用 FAEST via C-FFI
+use crate::faest_ffi;
 use num_bigint::{BigUint, RandBigInt};
-use std::time::Instant;
 use num_integer::Integer;
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
-use rsa::{
-    pkcs1v15::Pkcs1v15Encrypt,
-    RsaPrivateKey, RsaPublicKey,
-};
-use crate::faest_ffi;
+use rsa::{pkcs1v15::Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use std::time::Instant;
 
 // ────────────────────────────────────────────────────────────────────────────
 // § 1  后量子签名 Trait（Ed25519 占位实现）
@@ -216,7 +213,16 @@ impl ChameleonHash {
         use num_traits::ToPrimitive;
         let e_small = e.to_u64();
 
-        ChameleonHash { n, e, p, q, dp, dq, qinv, e_small }
+        ChameleonHash {
+            n,
+            e,
+            p,
+            q,
+            dp,
+            dq,
+            qinv,
+            e_small,
+        }
     }
 
     /// 正向哈希（矿工打包）：
@@ -271,12 +277,19 @@ impl ChameleonHash {
         let m2 = ratio.modpow(&self.dq, &self.q);
 
         // 计算 h = (m1 - m2) * qinv mod p（处理 m1 < m2 的情况）
-        let mut diff = if m1 >= m2 { m1.clone() - m2.clone() } else { (m1.clone() + &self.p) - m2.clone() };
+        let mut diff = if m1 >= m2 {
+            m1.clone() - m2.clone()
+        } else {
+            (m1.clone() + &self.p) - m2.clone()
+        };
         diff = (diff * &self.qinv) % &self.p;
         let result = m2 + (&self.q * diff);
         let elapsed = start.elapsed();
 
-        eprintln!("[perf] ChameleonHash::forge CRT+BigUint elapsed: {} ms", elapsed.as_millis());
+        eprintln!(
+            "[perf] ChameleonHash::forge CRT+BigUint elapsed: {} ms",
+            elapsed.as_millis()
+        );
         // r' = result * r mod N
         let r_prime = (result * old_r) % &self.n;
 
@@ -309,7 +322,9 @@ fn mod_inverse(a: &BigUint, m: &BigUint) -> Option<BigUint> {
 
 /// 快速模幂：基于 u64 指数的平方-乘 (square-and-multiply)，用于加速常见小指数场景（如 e=65537）。
 fn modpow_u64(base: &BigUint, mut exp: u64, modulus: &BigUint) -> BigUint {
-    if modulus.is_one() { return BigUint::zero(); }
+    if modulus.is_one() {
+        return BigUint::zero();
+    }
     let mut result = BigUint::one();
     let mut base_mod = base % modulus;
     while exp > 0 {
@@ -325,7 +340,10 @@ fn modpow_u64(base: &BigUint, mut exp: u64, modulus: &BigUint) -> BigUint {
 }
 
 /// 扩展欧几里得算法，返回 (gcd, x, y) 使得 a*x + b*y = gcd。
-fn extended_gcd(a: num_bigint::BigInt, b: num_bigint::BigInt) -> (num_bigint::BigInt, num_bigint::BigInt, num_bigint::BigInt) {
+fn extended_gcd(
+    a: num_bigint::BigInt,
+    b: num_bigint::BigInt,
+) -> (num_bigint::BigInt, num_bigint::BigInt, num_bigint::BigInt) {
     use num_bigint::BigInt;
 
     if a.is_zero() {
@@ -360,7 +378,9 @@ mod tests {
     fn test_faest_sign_verify() {
         let (priv_bytes, pub_bytes) = generate_faest_keypair();
         // 若 FAEST keygen 失败，跳过测试
-        if priv_bytes.is_empty() || pub_bytes.is_empty() { return; }
+        if priv_bytes.is_empty() || pub_bytes.is_empty() {
+            return;
+        }
         let signer = FaestImpl;
         let message = b"transaction payload hash";
 

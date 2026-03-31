@@ -40,7 +40,10 @@ pub fn keygen() -> Result<(Vec<u8>, Vec<u8>)> {
 /// Sign a message with FAEST private key
 pub fn sign(sk: &[u8], message: &[u8]) -> Result<Vec<u8>> {
     if sk.len() != FAEST_256S_PRIVATE_KEY_SIZE {
-        return Err(anyhow!("faest private key must be {} bytes", FAEST_256S_PRIVATE_KEY_SIZE));
+        return Err(anyhow!(
+            "faest private key must be {} bytes",
+            FAEST_256S_PRIVATE_KEY_SIZE
+        ));
     }
     let mut sig = vec![0u8; FAEST_256S_SIGNATURE_SIZE];
     let mut sig_len: size_t = FAEST_256S_SIGNATURE_SIZE as size_t;
@@ -64,7 +67,10 @@ pub fn sign(sk: &[u8], message: &[u8]) -> Result<Vec<u8>> {
 /// Verify a FAEST signature
 pub fn verify(pk: &[u8], message: &[u8], signature: &[u8]) -> Result<bool> {
     if pk.len() != FAEST_256S_PUBLIC_KEY_SIZE {
-        return Err(anyhow!("faest public key must be {} bytes", FAEST_256S_PUBLIC_KEY_SIZE));
+        return Err(anyhow!(
+            "faest public key must be {} bytes",
+            FAEST_256S_PUBLIC_KEY_SIZE
+        ));
     }
     let ret = unsafe {
         faest_256s_verify(

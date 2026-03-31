@@ -13,21 +13,27 @@
 
 ```bash
 # 构建
-# 若使用 FAEST（推荐），请先在 libs/ 中构建 FAEST（需 meson + ninja），或在系统中安装可被 linker 识别的 libfaest:
+# 若使用 FAEST（推荐），请先在 libs/FAEST/ 中构建 FAEST（需 meson + ninja），或在系统中安装可被 linker 识别的 libfaest:
 
-# 在 libs/ 目录下（仓库已包含 FAEST 子模块），一次性构建 FAEST：
-meson setup libs/builddir && ninja -C libs/builddir
+# 在 libs/FAEST/ 目录下（仓库已包含 FAEST 子模块），一次性构建 FAEST：
+meson setup libs/FAEST/builddir && ninja -C libs/FAEST/builddir
 
 # 构建并运行 Rust 项目（建议使用共享库路径）：
 # 可选：构建并编译小 C wrapper（通过 build.rs），使用环境变量启用：
 FAEST_BUILD_WRAPPER=1 cargo build
 
 # 运行（确保动态库可被加载）：
-LD_LIBRARY_PATH=libs/builddir: FAEST_BUILD_WRAPPER=1 cargo run
+LD_LIBRARY_PATH=libs/FAEST/builddir: FAEST_BUILD_WRAPPER=1 cargo run
+
+有占了
+[coper@coperpc DateSecurityFinalProject]$  ss -ltnp | grep :8080 || true
+LISTEN 0      128          0.0.0.0:8080       0.0.0.0:*    users:(("date_security_c",pid=255810,fd=9))
+[coper@coperpc DateSecurityFinalProject]$  kill 255810 && sleep 0.2 && ss -ltnp | grep :8080 || true
+[coper@coperpc DateSecurityFinalProject]$ 
 
 # 说明：
 # - 需要在系统中安装 `meson` 和 `ninja`（例如通过 `pip install meson` / 包管理器安装或系统包）。
-# - `LD_LIBRARY_PATH=libs/builddir:` 用于运行时找到 `libfaest.so`，也可将该路径加入系统链接器搜索路径（例如 `/etc/ld.so.conf.d/` 然后 `ldconfig`）。
+# - `LD_LIBRARY_PATH=libs/FAEST/builddir:` 用于运行时找到 `libfaest.so`，也可将该路径加入系统链接器搜索路径（例如 `/etc/ld.so.conf.d/` 然后 `ldconfig`）。
 # - 若不想使用共享库，可将 `libfaest.a` 静态库安装到系统链接路径并调整 `build.rs`，但仓库中默认推荐使用 `libfaest.so` 以避免 thin-archive 链接问题。
 ```
 

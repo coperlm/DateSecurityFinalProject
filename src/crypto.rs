@@ -37,7 +37,7 @@ pub trait PqSignature {
 
 // 使用 FAEST FFI 实现后量子签名功能（见 `faest_ffi` 模块）
 
-/// FAEST 后量子签名实现（通过 C-FFI 调用 libs/faest）
+/// FAEST 后量子签名实现（通过 C-FFI 调用 libs/FAEST）
 pub struct FaestImpl;
 
 impl PqSignature for FaestImpl {
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(plaintext.as_ref(), recovered.as_slice(), "明文应完整还原");
     }
 
-    /// 测试 FAEST 签名与验证（通过 FFI 调用 libs/faest）
+    /// 测试 FAEST 签名与验证（通过 FFI 调用 libs/FAEST）
     #[test]
     fn test_faest_sign_verify() {
         let (priv_bytes, pub_bytes) = generate_faest_keypair();

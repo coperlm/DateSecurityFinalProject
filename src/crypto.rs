@@ -1,14 +1,13 @@
 // crypto.rs — 密码学底层模块
-// 包含：数字信封加解密、后量子签名占位符、AES-CMAC 哈希、变色龙哈希
+// 包含：数字信封加解密、后量子签名占位符、AES-CTR 压缩函数、变色龙哈希
 
-use aes::Aes128;
+use aes::Aes256;
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng as AeadOsRng},
     Aes256Gcm, Key, Nonce,
 };
 use anyhow::{anyhow, Result};
-use cmac::{Cmac, Mac};
-use sha2::{Digest, Sha256};
+use ctr::cipher::{KeyIvInit, StreamCipher};
 // Ed25519 卸载：使用 FAEST via C-FFI
 use crate::faest_ffi;
 use num_bigint::{BigUint, RandBigInt};
@@ -146,26 +145,51 @@ pub fn generate_rsa_keypair() -> Result<(RsaPrivateKey, RsaPublicKey)> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// § 3  基于 AES-128-CMAC 的哈希函数 H_AES(m)
+// § 3  基于 AES-CTR 的压缩函数 H_AES(m)
 // ────────────────────────────────────────────────────────────────────────────
 
-/// 使用固定 zero-key 的 AES-128-CMAC 将任意字节压缩为 128-bit BigUint。
+type Aes256Ctr = ctr::Ctr128BE<Aes256>;
+
+/// 使用固定公开参数的 AES-256-CTR 将任意字节压缩为 128-bit BigUint。
 /// H_AES(m) 的结果用于变色龙哈希计算。
 ///
-/// 注意：固定 key 使其行为类似于一个公共压缩函数，
-/// 而非 MAC（MAC 需要秘密 key）。此处仅用于哈希语义。
+/// 注意：此函数不调用任何哈希库，而是使用 AES-CTR 生成伪随机流后折叠压缩。
 pub fn h_aes(data: &[u8]) -> BigUint {
-    // 使用全零 128-bit key（公共常量，非密钥用途）
-    // 优化：对于任意长度输入，先使用 SHA-256 摘要，再对定长摘要做 CMAC，
-    // 这样可以显著降低 CMAC 对超大文件的处理开销，同时保持确定性。
-    let key = [0u8; 16];
-    let mut mac = <Cmac<Aes128> as Mac>::new_from_slice(&key).expect("AES-CMAC 初始化失败");
+    // 固定公开常量，仅用于构造确定性的公共压缩函数。
+    let key = [0u8; 32];
+    let iv = [0u8; 16];
 
-    // 先做 SHA-256 摘要（固定 32 字节），再对摘要做 CMAC
-    let digest = Sha256::digest(data);
-    mac.update(&digest);
-    let tag = mac.finalize().into_bytes();
-    BigUint::from_bytes_be(&tag)
+    // 第一步：AES-CTR 处理原始输入，得到与输入等长的伪随机变换结果。
+    let mut stream_data = data.to_vec();
+    let mut ctr1 = Aes256Ctr::new(&key.into(), &iv.into());
+    ctr1.apply_keystream(&mut stream_data);
+
+    // 第二步：将任意长度输出折叠到 16 字节状态。
+    let mut state = [0u8; 16];
+    for (i, b) in stream_data.iter().enumerate() {
+        let j = i & 0x0f;
+        state[j] ^= *b;
+        let k = (j * 5 + 1) & 0x0f;
+        state[k] = state[k].wrapping_add(*b ^ (i as u8).rotate_left((j as u32) & 7));
+    }
+
+    // 混入输入长度，避免常见前缀/填充碰撞模式。
+    let len_bytes = (data.len() as u128).to_be_bytes();
+    for i in 0..16 {
+        state[i] ^= len_bytes[i];
+    }
+
+    // 第三步：再进行一次 AES-CTR 变换，提高扩散性。
+    let mut out = state;
+    let mut ctr2 = Aes256Ctr::new(&key.into(), &iv.into());
+    ctr2.apply_keystream(&mut out);
+
+    // 避免输出为 0，降低在模逆环节触发不可逆的概率。
+    if out.iter().all(|x| *x == 0) {
+        out[15] = 1;
+    }
+
+    BigUint::from_bytes_be(&out)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -429,15 +453,15 @@ mod tests {
         );
     }
 
-    /// 测试 AES-CMAC 哈希的确定性。
+    /// 测试 AES-CTR 压缩函数的确定性。
     #[test]
     fn test_h_aes_deterministic() {
         let data = b"deterministic input";
         let h1 = h_aes(data);
         let h2 = h_aes(data);
-        assert_eq!(h1, h2, "相同输入应产生相同哈希");
+        assert_eq!(h1, h2, "相同输入应产生相同压缩输出");
 
         let h3 = h_aes(b"different input");
-        assert_ne!(h1, h3, "不同输入应产生不同哈希");
+        assert_ne!(h1, h3, "不同输入应产生不同压缩输出");
     }
 }

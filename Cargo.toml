@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # 密码学：RSA 与大整数
-rsa = { version = "0.9", features = ["pem", "sha2"] }
+rsa = { version = "0.9", features = ["pem"] }
 num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
 num-integer = "0.1"
@@ -22,12 +22,9 @@ num-integer = "0.1"
 # 密码学：AES-GCM 对称加密
 aes-gcm = "0.10"
 
-# 密码学：AES-128-CMAC 哈希替代
+# 密码学：AES-CTR 压缩函数与 AES-GCM
 aes = "0.8"
-cmac = "0.7"
-
-# SHA-256 用于先摘要大型明文以缩短 CMAC 输入
-sha2 = "0.10"
+ctr = "0.9"
 
 # 密码学：FAEST 后量子签名（通过 C-FFI 链接 libs/FAEST）
 

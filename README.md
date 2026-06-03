@@ -1,5 +1,4 @@
 # DateSecurityFinalProject
-企业级合规文件加密客户端（实验/教学版）
 
 ## 一、项目概览
 本项目实现一个 Rust+Axum 的 Web 服务，演示以下技术组合：
